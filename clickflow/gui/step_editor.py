@@ -1,8 +1,9 @@
-"""Editor panel for one Step (simple view / advanced view), plus the small end-condition editor.
+"""Editor panel for one Step (simple view / advanced sections), plus the small end-condition editor.
 
-One widget tree serves both modes: ``set_advanced(False)`` shows only what a newcomer needs (name, target image,
-click type, "only if found"); ``set_advanced(True)`` unfolds every setting in collapsible groups. All controls keep
-the same attribute names in both modes, so the data binding below does not care which one is on screen.
+One widget tree serves both modes. Simple mode shows only what a newcomer needs: the step name, the big target image with
+*Re-select* / *Test this step*, the click type and *Click only if found*. Advanced mode splits the rest into three sections
+(the main window's tabs): *Step* (adds the click point), *Match & area* and *Waits & fallbacks*. All controls keep the same
+attribute names in both modes, so the data binding below does not care which one is on screen.
 """
 from __future__ import annotations
 
@@ -10,8 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget
 
 from ..models import (AFTER_RETRY_ACTIONS, CLICK_TYPES, NOT_FOUND_ACTIONS, Preset, Step, effective_region,
                       effective_template, set_region)
@@ -20,6 +20,8 @@ from .i18n import tr
 from .qtutils import bgr_to_pixmap
 from .widgets import (Alert, Group, HatchedThumb, Segmented, SafeComboBox, SafeDoubleSpinBox, SafeSpinBox, Switch,
                       SwitchRow, ThresholdSlider, Thumbnail, button, field, label)
+
+LABEL_COL_W = 88  # the left label column of the form rows
 
 
 def not_found_labels() -> dict[str, str]:
@@ -33,6 +35,13 @@ def after_retry_labels() -> dict[str, str]:
 
 def click_labels() -> dict[str, str]:
     return {"left": tr("Left"), "right": tr("Right"), "double": tr("Double")}
+
+
+def row_label(text: str) -> QWidget:
+    """The caption in the 88 px label column of a form row."""
+    lb = label(text, "muted")
+    lb.setFixedWidth(LABEL_COL_W)
+    return lb
 
 
 def load_thumbnail(thumb: Thumbnail, directory: Optional[Path], rel: str) -> None:
@@ -81,13 +90,6 @@ def _row(*items, spacing: int = 12, stretch: bool = True) -> QHBoxLayout:
     return lay
 
 
-def _detach(w: QWidget) -> None:
-    """Take ``w`` out of whatever layout holds it so it can be added to another one."""
-    p = w.parentWidget()
-    if p is not None and p.layout() is not None:
-        p.layout().removeWidget(w)
-
-
 class StepEditor(QWidget):
     changed = Signal()
     capture_requested = Signal()
@@ -95,6 +97,8 @@ class StepEditor(QWidget):
     show_boxes_requested = Signal()
     test_requested = Signal()
     guard_capture_requested = Signal()
+
+    SECTIONS = 3  # advanced: 0 Step, 1 Match & area, 2 Waits & fallbacks
 
     def __init__(self) -> None:
         super().__init__()
@@ -105,6 +109,7 @@ class StepEditor(QWidget):
         self._waits_locked = False
         self._loading = False
         self._advanced = False
+        self._section = 0
         self._build()
 
     # ------------------------------------------------------------------ UI
@@ -112,77 +117,87 @@ class StepEditor(QWidget):
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(16)
+        root.setSpacing(12)
 
-        # ---- basic: name, target image, buttons
+        # ---- head: the step name is the page title (editable in place) + the enabled switch (advanced)
+        self.name = QLineEdit()
+        self.name.setProperty("title", True)
+        self.name.setPlaceholderText(tr("Step name"))
+        self.name_field = self.name
         self.enabled = Switch()
         self.enabled_box = QWidget()
         eb = QHBoxLayout(self.enabled_box)
-        eb.setContentsMargins(0, 0, 4, 0)
+        eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(8)
         self.enabled_lbl = label(tr("Enabled"), "muted")
         eb.addWidget(self.enabled_lbl)
         eb.addWidget(self.enabled)
-        self.grp_basic = Group(tr("Step details"), True, self.enabled_box)
-        self.name = QLineEdit()
-        self.name_field = field(tr("Name"), self.name)
-        self.grp_basic.add(self.name_field)
+        self.head = QWidget()
+        hl = QHBoxLayout(self.head)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(16)
+        hl.addWidget(self.name, 1)
+        hl.addWidget(self.enabled_box)
+        root.addWidget(self.head)
 
-        self.thumb = Thumbnail(120, 80)
-        self.thumb_hidden = HatchedThumb(120, 80)
+        # ---- target card: the big preview, the two actions and the one-line search-area status
+        self.target_card = QFrame()
+        self.target_card.setProperty("card", True)
+        self.target_card.setMinimumHeight(160)
+        cl = QVBoxLayout(self.target_card)
+        cl.setContentsMargins(12, 12, 12, 12)
+        cl.setSpacing(12)
+        self.thumb = Thumbnail()
+        self.thumb_hidden = HatchedThumb()
         self.thumb_hidden.setVisible(False)
-        self.btn_capture = button(tr("Re-select"), "select", tip=tr("Dims the screen; drag a rectangle around the target."))
-        self.btn_test = button(tr("Test this step"), "test", tip=tr("Look for the target once and highlight it. Does NOT click."))
-        self.target_caption = label(tr("Target image"), "field")
-        tcol = QVBoxLayout()
-        tcol.setContentsMargins(0, 0, 0, 0)
-        tcol.setSpacing(6)
-        tcol.addWidget(self.target_caption)
-        tbox = QHBoxLayout()
-        tbox.setSpacing(12)
-        tbox.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignTop)
-        tbox.addWidget(self.thumb_hidden, 0, Qt.AlignmentFlag.AlignTop)
-        side = QVBoxLayout()
-        self._side = side
-        side.setSpacing(10)
-        brow = QHBoxLayout()
-        brow.setSpacing(8)
-        brow.addWidget(self.btn_capture)
-        brow.addWidget(self.btn_test)
-        brow.addStretch(1)
-        side.addLayout(brow)
-        self.region_alert = Alert("", "wn", tr("Set up"))
+        cl.addWidget(self.thumb, 1)
+        cl.addWidget(self.thumb_hidden, 1)
+        self.btn_capture = button(tr("Re-select"), tip=tr("Dims the screen; drag a rectangle around the target."))
+        self.btn_test = button(tr("Test this step"), tip=tr("Look for the target once and highlight it. Does NOT click."))
+        self.region_alert = Alert("", "wn", tr("Set search area"), plain=True)
         self.region_hint = self.region_alert.label  # (kept name) the status text
         self.region_alert.action.clicked.connect(self.region_requested)
-        side.addWidget(self.region_alert)
-        side.addStretch(1)
-        tbox.addLayout(side, 1)
-        tcol.addLayout(tbox)
-        self._target_block = QWidget()
-        self._target_block.setLayout(tcol)
-        self.grp_basic.add(self._target_block)
-        root.addWidget(self.grp_basic)
+        self._card_row = QHBoxLayout()
+        self._card_row.setSpacing(8)
+        self._card_row.addWidget(self.btn_capture)
+        self._card_row.addWidget(self.btn_test)
+        self._card_row.addSpacing(8)
+        self._card_row.addWidget(self.region_alert, 1)
+        self._card_fill = QWidget()  # takes the free width while the search-area line is parked in the advanced section
+        self._card_fill.setVisible(False)
+        self._card_row.addWidget(self._card_fill, 1)
+        cl.addLayout(self._card_row)
+        root.addWidget(self.target_card, 1)
 
-        # ---- click type + only-if-found (lives in the basic card in simple mode, in "Click" in advanced mode)
+        # ---- click type + only-if-found: one row under the card (both modes)
         self.click_type = Segmented()
         labels = click_labels()
         for c in CLICK_TYPES:
             self.click_type.addItem(labels[c], c)
-        self.click_field = field(tr("Click type"), self.click_type)
-        self.only_row = SwitchRow(tr("Click only if found"), tr("Silently skip when the target is absent"))
+        self.only_row = SwitchRow(tr("Click only if found"), tr("Skips quietly if it isn't there"))
         self.only_if_found = self.only_row.switch
         self.only_if_found.setToolTip(tr("Use for 'already liked' checks: a missing target is not an error "
                                          "and no wait-after is spent."))
         self.click_block = QWidget()
         cb = QHBoxLayout(self.click_block)
         cb.setContentsMargins(0, 0, 0, 0)
-        cb.setSpacing(24)
-        cb.addWidget(self.click_field, 5)
-        cb.addWidget(self.only_row, 6, Qt.AlignmentFlag.AlignBottom)
-        self.grp_basic.add(self.click_block)
+        cb.setSpacing(12)
+        cb.addWidget(row_label(tr("Click")), 0, Qt.AlignmentFlag.AlignVCenter)
+        cb.addWidget(self.click_type, 0, Qt.AlignmentFlag.AlignVCenter)
+        cb.addSpacing(16)
+        cb.addWidget(self.only_row, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.click_field = self.click_block
+        root.addWidget(self.click_block)
 
-        # ---- advanced groups
-        self.grp_match = Group(tr("Match"), True)
+        # ---- advanced sections (borderless groups; one section is on screen at a time)
+        self.grp_click = Group(tr("Click point"), True, flat=True)
+        self.ox, self.oy = _spin(-5000, 5000, " px"), _spin(-5000, 5000, " px")
+        self.offset_row = QWidget()
+        self.offset_row.setLayout(_row(field(tr("Click offset dx"), self.ox), field("dy", self.oy)))
+        self.grp_click.add(self.offset_row)
+        root.addWidget(self.grp_click)
+
+        self.grp_match = Group(tr("Match"), True, flat=True)
         self.threshold = ThresholdSlider(tr("Match strictness"))
         self.threshold.setToolTip(tr("Minimum match confidence (0.50 - 1.00). Higher = stricter."))
         self.grp_match.add(self.threshold)
@@ -193,10 +208,8 @@ class StepEditor(QWidget):
         self.scale_lbl = label(tr("Resize range"), "muted")
         ms = QHBoxLayout()
         ms.setSpacing(10)
-        ms_title = label(tr("Auto-resize matching"))
-        ms_title.setStyleSheet("font-weight: 600;")
         ms.addWidget(self.multi_scale)
-        ms.addWidget(ms_title)
+        ms.addWidget(label(tr("Auto-resize matching"), "section"))
         ms.addStretch(1)
         ms.addWidget(self.scale_lbl)
         ms.addWidget(self.scale_min)
@@ -214,11 +227,11 @@ class StepEditor(QWidget):
         self.grp_match.add(self.outline_row)
         root.addWidget(self.grp_match)
 
-        self.grp_area = Group(tr("Search area"), True)
-        self.btn_region = button(tr("Draw"), "select", tip=tr("Drag a rectangle around the area where the target shows up. "
-                                                              "It is saved and applied on every run (per display preset)."))
+        self.grp_area = Group(tr("Search area"), True, flat=True)
+        self.btn_region = button(tr("Draw"), tip=tr("Drag a rectangle around the area where the target shows up. "
+                                                    "It is saved and applied on every run (per display preset)."))
         self.btn_clear_region = button(tr("Clear"))
-        self.btn_show_boxes = button(tr("Show boxes"), "eye", tip=tr("Briefly draw the search areas of all steps on the screen."))
+        self.btn_show_boxes = button(tr("Show boxes"), tip=tr("Briefly draw the search areas of all steps on the screen."))
         self.area_btn_row = QWidget()
         ab = QHBoxLayout(self.area_btn_row)
         ab.setContentsMargins(0, 0, 0, 0)
@@ -233,15 +246,7 @@ class StepEditor(QWidget):
                                field(tr("Height"), self.rh)))
         root.addWidget(self.grp_area)
 
-        self.grp_click = Group(tr("Click"), True)
-        self.ox, self.oy = _spin(-5000, 5000, " px"), _spin(-5000, 5000, " px")
-        self.offset_row = QWidget()
-        orow = _row(field(tr("Click offset dx"), self.ox), field("dy", self.oy))
-        self.offset_row.setLayout(orow)
-        self.grp_click.add(self.offset_row)
-        root.addWidget(self.grp_click)
-
-        self.grp_wait = Group(tr("Waits & failure handling"), True)
+        self.grp_wait = Group(tr("Waits & failure handling"), True, flat=True)
         self.waits_note = Alert("", "info")
         self.grp_wait.add(self.waits_note)
         self.chk_manual = QCheckBox(tr("Advanced: edit waits manually"))
@@ -278,8 +283,8 @@ class StepEditor(QWidget):
         self.fallback_click_last = self.blind_row.switch
         self.grp_wait.add(self.blind_row)
         self.guard_thumb = Thumbnail(72, 48)
-        self.btn_guard = button(tr("Capture"), "select", tip=tr("Drag a rectangle around the image that means 'already "
-                                                               "done', e.g. the red (liked) heart."))
+        self.btn_guard = button(tr("Capture"), tip=tr("Drag a rectangle around the image that means 'already "
+                                                      "done', e.g. the red (liked) heart."))
         self.btn_clear_guard = button(tr("Clear"))
         self.guard_threshold = _dspin(0.5, 1.0, 0.01)
         self.guard_threshold.setToolTip(tr("How closely the screen must match the 'skip if present' image."))
@@ -304,7 +309,6 @@ class StepEditor(QWidget):
                                     "(e.g. unlike a liked story)."), "wn")
         self.grp_wait.add(self.guard_alert)
         root.addWidget(self.grp_wait)
-        root.addStretch(1)
 
         for w in (self.name, self.fallback_key):
             w.editingFinished.connect(self._apply)
@@ -331,27 +335,40 @@ class StepEditor(QWidget):
     def is_advanced(self) -> bool:
         return self._advanced
 
+    def section(self) -> int:
+        return self._section
+
     def set_advanced(self, adv: bool) -> None:
         self._advanced = adv
-        # shared pieces move between the basic card (simple) and their advanced groups
-        for lay in (self.grp_basic.body_lay, self.grp_click.body_lay, self.grp_area.body_lay, self._side):
-            lay.removeWidget(self.click_block)
-            lay.removeWidget(self.region_alert)
+        # the search-area line sits in the target card (simple) or at the top of the "Search area" section (advanced)
+        self._card_row.removeWidget(self.region_alert)
+        self.grp_area.body_lay.removeWidget(self.region_alert)
         if adv:
-            self.grp_click.body_lay.insertWidget(0, self.click_block)
             self.grp_area.body_lay.insertWidget(0, self.region_alert)
         else:
-            self.grp_basic.body_lay.addWidget(self.click_block)
-            self._side.insertWidget(1, self.region_alert)
-        self.grp_basic.set_title(tr("Basic") if adv else tr("Step details"))
-        self.enabled_box.setVisible(adv)
+            self._card_row.insertWidget(self._card_row.indexOf(self._card_fill), self.region_alert, 1)
+        self._card_fill.setVisible(adv)
         self.region_alert.show()
-        self.click_block.show()
-        for g in (self.grp_match, self.grp_area, self.grp_click, self.grp_wait):
-            g.setVisible(adv)
-        self.offset_row.setVisible(adv)
-        self.name_field.setVisible(True)
+        self.enabled_box.setVisible(adv)
+        self._apply_section()
         self._update_enabled_state()
+
+    def set_section(self, i: int) -> None:
+        """Advanced mode: which of the three sections is on screen (0 Step, 1 Match & area, 2 Waits & fallbacks)."""
+        self._section = max(0, min(self.SECTIONS - 1, i))
+        self._apply_section()
+
+    def _apply_section(self) -> None:
+        s = self._section if self._advanced else 0
+        adv = self._advanced
+        self.head.setVisible(s == 0)
+        self.target_card.setVisible(s == 0)
+        self.click_block.setVisible(s == 0)
+        self.grp_click.setVisible(adv and s == 0)
+        self.grp_match.setVisible(adv and s == 1)
+        self.grp_area.setVisible(adv and s == 1)
+        self.grp_wait.setVisible(adv and s == 2)
+        self.offset_row.setVisible(adv)
 
     # ------------------------------------------------------------------ binding
 
@@ -482,8 +499,7 @@ class StepEditor(QWidget):
             self.grp_area.set_tag(tr("Set"), "ok")
         else:
             self.region_alert.set_tone("wn")
-            self.region_alert.set_text(tr("No search area{where}: the whole screen is scanned, which is slower and can pick "
-                                          "look-alikes.", where=where))
+            self.region_alert.set_text(tr("Scanning the whole screen{where}.", where=where))
             self.region_alert.action.setVisible(True)
             self.grp_area.set_tag(tr("Not set"), "wn")
         has_guard = bool(self._step and self._step.guard_template)
@@ -538,7 +554,7 @@ class EndConditionEditor(Group):
 
     def __init__(self) -> None:
         enabled = Switch()
-        super().__init__(tr("End condition"), True, enabled)
+        super().__init__(tr("End condition"), True, enabled, flat=True)
         self.enabled = enabled
         self.head_btn.setToolTip(tr("Stop the run as soon as this image is seen."))
         self._step: Optional[Step] = None
@@ -548,18 +564,21 @@ class EndConditionEditor(Group):
         self.subtitle = label(tr("Stop as soon as this image is seen"), "hint")
         self.add(self.subtitle)
         self.thumb = Thumbnail(104, 72)
-        self.btn_capture = button(tr("Re-select"), "select")
-        self.btn_region = button(tr("Draw search area"), "select")
+        self.btn_capture = button(tr("Re-select"))
+        self.btn_region = button(tr("Draw search area"))
         self.btn_clear_region = button(tr("Clear"))
         col = QVBoxLayout()
         col.setSpacing(8)
         r1 = QHBoxLayout()
         r1.setSpacing(8)
         r1.addWidget(self.btn_capture)
-        r1.addWidget(self.btn_region)
         r1.addWidget(self.btn_clear_region)
         r1.addStretch(1)
         col.addLayout(r1)
+        r2 = QHBoxLayout()
+        r2.addWidget(self.btn_region)
+        r2.addStretch(1)
+        col.addLayout(r2)
         self.region_label = label(tr("Search area: whole screen"), "hint")
         col.addWidget(self.region_label)
         col.addStretch(1)

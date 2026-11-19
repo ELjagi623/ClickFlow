@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence, QPixmap, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (QAction, QColor, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QTextCharFormat,
+                           QTextCursor)
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidgetItem, QMainWindow, QMenu,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
@@ -30,9 +31,9 @@ from . import dialogs, i18n, icons, prefs, theme
 from .i18n import tr
 from .overlays import CaptureOverlay, Highlighter, StopBadge
 from .qtutils import bgr_to_pixmap
-from .step_editor import EndConditionEditor, StepEditor
+from .step_editor import LABEL_COL_W, EndConditionEditor, StepEditor, row_label
 from .widgets import (
-    ROLE_ID, ROLE_VIEW, Alert, Group, HotkeyEdit, MatchMeter, Pill, SafeComboBox, SafeDoubleSpinBox, SafeSlider,
+    ROLE_ID, ROLE_VIEW, ROW_H, Alert, Group, HotkeyEdit, MatchMeter, Pill, SafeComboBox, SafeDoubleSpinBox, SafeSlider,
     SafeSpinBox, Segmented, StepList, Switch, SwitchRow, TabStrip, Tile, button, field, hline, icon_button, label,
     repolish, set_icon, tag,
 )
@@ -40,7 +41,8 @@ from .worker import CallThread, RunThread
 
 log = logging.getLogger("clickflow")
 
-LEFT_COL_W = 340
+LEFT_COL_W = 288          # the step column (248 below ~1100 px window width)
+LEFT_COL_COMPACT_W = 248
 
 
 class _InfiniteProxy(QObject):
@@ -66,8 +68,9 @@ class _InfiniteProxy(QObject):
 class MainWindow(QMainWindow):
     stop_hotkey_pressed = Signal()
 
-    def __init__(self, profile: Optional[Profile] = None, *, start_hotkey: bool = True) -> None:
+    def __init__(self, profile: Optional[Profile] = None, *, start_hotkey: bool = True, defer_hotkey: bool = False) -> None:
         super().__init__()
+        self._defer_hotkey = defer_hotkey and start_hotkey  # start the hotkey listeners in finish_startup(), after the first paint
         self.setWindowTitle("ClickFlow")
         self.setMinimumSize(960, 640)
         self._fit_to_screen()
@@ -91,6 +94,8 @@ class MainWindow(QMainWindow):
         self._clock.timeout.connect(self._tick_dashboard)
         self._last_max_clicks = 500
         self._log_entries: list[tuple[str, str, str, str]] = []
+        self._capture_kind = "target"  # what the next overlay selects: "target" (cream) or "area" (teal)
+        self._pending_new_step: Optional[str] = None  # id of a step created by 'Add step' whose first capture is still open
 
         self._build_ui()
         self._build_actions()
@@ -100,6 +105,13 @@ class MainWindow(QMainWindow):
         self._hotkey_enabled = start_hotkey
         self.load_into_ui(self.profile)
         self._set_running(False)
+
+    def finish_startup(self) -> None:
+        """Work that is not needed to paint the first screen (pynput import, hotkey listeners); called once the window is up."""
+        if self._defer_hotkey:
+            self._defer_hotkey = False
+            if self._hotkey_enabled:
+                self._start_hotkey()
 
     # ================================================================== window size
 
@@ -140,91 +152,110 @@ class MainWindow(QMainWindow):
         self.mode_seg.setCurrentIndex(1 if self._advanced else 0)
         self._place_run_card()
         self._on_tab_changed(self.tabs.currentIndex())
+        self._compact = None
+        self._apply_density()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_density()
+
+    def _apply_density(self) -> None:
+        """Below ~1100 px wide the step column narrows to 248, the gap to 24 and the margins to 16 (960 x 640 must fit)."""
+        compact = self.width() < 1100
+        if getattr(self, "_compact", None) == compact or not hasattr(self, "_ws_lay"):
+            return
+        self._compact = compact
+        self.steps_col.setFixedWidth(LEFT_COL_COMPACT_W if compact else LEFT_COL_W)
+        self._ws_lay.setSpacing(24 if compact else 32)
+        self._ws_lay.setContentsMargins(*((16, 16, 16, 12) if compact else (24, 24, 24, 16)))
 
     # ---------------------------------------------------------------- top bar
+
+    @staticmethod
+    def _dot_icon() -> QIcon:
+        """The small coral dot that marks unsaved changes next to the profile name."""
+        px = QPixmap(16, 16)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.qcolor("ac"))
+        p.drawEllipse(4, 4, 8, 8)
+        p.end()
+        return QIcon(px)
 
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("topbar")
         bar.setFixedHeight(56)
         row = QHBoxLayout(bar)
-        row.setContentsMargins(16, 0, 16, 0)
-        row.setSpacing(10)
+        row.setContentsMargins(24, 0, 16, 0)
+        row.setSpacing(8)
         logo = QLabel()
-        logo.setFixedSize(32, 32)
+        logo.setFixedSize(28, 28)
         try:
             from ..app import resource_root
 
             pm = QPixmap(str(resource_root() / "assets" / "icon.png"))
             if not pm.isNull():
-                logo.setPixmap(pm.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                logo.setPixmap(pm.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
                 logo.setScaledContents(True)
         except Exception:
             pass
         row.addWidget(logo)
+        row.addSpacing(4)
 
+        # the profile name is the menu; a coral dot appears on it while there are unsaved changes
         self.profile_btn = QToolButton()
         self.profile_btn.setProperty("profile", True)
         self.profile_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.profile_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.profile_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.profile_btn.setMaximumWidth(240)
+        self.profile_btn.setMaximumWidth(360)
         self.profile_menu = QMenu(self.profile_btn)
         self.profile_menu.aboutToShow.connect(self._fill_profile_menu)
         self.profile_btn.setMenu(self.profile_menu)
-        set_icon(self.profile_btn, "file", "tx", 16)
         row.addWidget(self.profile_btn)
 
+        # display preset: used (and switched) often, so it stays one click away right next to the profile name
         self.preset_btn = QToolButton()
-        self.preset_btn.setProperty("profile", True)
+        self.preset_btn.setProperty("topbtn", True)
         self.preset_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.preset_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.preset_btn.setMaximumWidth(260)
-        self.preset_btn.setToolTip(tr("A preset stores the search areas (and optionally target images) for one display "
-                                      "resolution. Edits you make while a preset is selected go into that preset."))
-        self.preset_menu = QMenu(self.preset_btn)
+        self.preset_btn.setMaximumWidth(220)
+        set_icon(self.preset_btn, "display", "tx2", 16)
+        self.preset_menu = QMenu(tr("Display preset"), self.preset_btn)
         self.preset_menu.aboutToShow.connect(self._fill_preset_menu)
         self.preset_btn.setMenu(self.preset_menu)
-        set_icon(self.preset_btn, "display", "tx", 16)
         row.addWidget(self.preset_btn)
-
-        self.save_state = label("", "hint")
-        row.addWidget(self.save_state)
-        self.btn_save_top = icon_button("save", tr("Save") + "  Ctrl+S", "ghost", on_click=lambda: self.save())
-        row.addWidget(self.btn_save_top)
-        self.btn_notes = QToolButton()
-        self.btn_notes.setProperty("topbtn", True)
-        self.btn_notes.setText(tr("Notes"))
-        self.btn_notes.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_notes.setCursor(Qt.CursorShape.PointingHandCursor)
-        set_icon(self.btn_notes, "note", "tx2", 16)
-        self.btn_notes.clicked.connect(self._show_notes)
-        row.addWidget(self.btn_notes)
         row.addStretch(1)
 
         self.mode_seg = Segmented(fill=False)
         self.mode_seg.addItem(tr("Simple"), False)
         self.mode_seg.addItem(tr("Advanced"), True)
         self.mode_seg.currentIndexChanged.connect(lambda i: self.set_mode(bool(i)))
-        self.mode_seg.setFixedHeight(34)
         row.addWidget(self.mode_seg, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.btn_theme = icon_button("moon" if theme.mode() == "light" else "sun", tr("Switch light / dark theme"), "ghost",
-                                     on_click=self._toggle_theme, token="tx2")
-        row.addWidget(self.btn_theme)
+        row.addSpacing(8)
         self.btn_lang = QToolButton()
         self.btn_lang.setProperty("topbtn", True)
         self.btn_lang.setText("EN" if i18n.language() == "zh" else "中文")
-        self.btn_lang.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.btn_lang.setToolTip(tr("Switch language"))
         self.btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
-        set_icon(self.btn_lang, "globe", "tx2", 16)
-        self.btn_lang.clicked.connect(self._toggle_language)
+        # (run after the click has finished: the rebuild deletes this very button)
+        self.btn_lang.clicked.connect(lambda: QTimer.singleShot(0, self._toggle_language))
         row.addWidget(self.btn_lang)
-        self.btn_about = icon_button("info", tr("About / safety notes"), "ghost", on_click=self.show_about, token="tx2")
-        row.addWidget(self.btn_about)
-        self._lockable_top = (self.profile_btn, self.preset_btn, self.btn_save_top, self.mode_seg)
-        self.banner = QLabel()  # first part of the profile notes (not shown: the Notes button carries it as a tooltip)
+
+        # everything else folds into one menu: step actions, display presets, notes, about
+        self.btn_more = icon_button("more", tr("More"), "ghost", on_click=None, token="tx2")
+        self.btn_more.setProperty("more", True)
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_menu = QMenu(self.btn_more)
+        self.more_menu.aboutToShow.connect(self._fill_more_menu)
+        self.btn_more.setMenu(self.more_menu)
+        row.addWidget(self.btn_more)
+        self._lockable_top = (self.profile_btn, self.preset_btn, self.btn_more, self.mode_seg)
+        self.banner = QLabel()  # first part of the profile notes (not shown: the "Profile notes" menu entry opens them)
         self.banner.setVisible(False)
         return bar
 
@@ -232,16 +263,16 @@ class MainWindow(QMainWindow):
 
     def _build_workspace(self) -> QWidget:
         page = QWidget()
-        lay = QHBoxLayout(page)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(16)
-        lay.addWidget(self._build_steps_card())
+        self._ws_lay = QHBoxLayout(page)
+        self._ws_lay.setContentsMargins(24, 24, 24, 16)
+        self._ws_lay.setSpacing(32)
+        self.steps_col = self._build_steps_col()
+        self._ws_lay.addWidget(self.steps_col)
         right = QVBoxLayout()
         right.setSpacing(12)
         self.tabs = TabStrip()
-        self._tag_global = tag(tr("Loops · hotkey · presets"), "")
-        self.tabs.add(tr("Step settings"))
-        self.tabs.add(tr("Global settings"), self._tag_global)
+        for text in (tr("Step"), tr("Match & area"), tr("Waits & fallbacks"), tr("Global")):
+            self.tabs.add(text)
         self.tabs.finish()
         self.tabs.currentChanged.connect(self._on_tab_changed)
         right.addWidget(self.tabs)
@@ -250,7 +281,7 @@ class MainWindow(QMainWindow):
         self.right_stack.addWidget(self._scroll(self._build_global_page(), "scroll_global"))  # 1
         self.right_stack.addWidget(self._scroll(self._build_dashboard(), "scroll_dash"))     # 2
         right.addWidget(self.right_stack, 1)
-        lay.addLayout(right, 1)
+        self._ws_lay.addLayout(right, 1)
         return page
 
     def _scroll(self, widget: QWidget, attr: str) -> QScrollArea:
@@ -262,54 +293,43 @@ class MainWindow(QMainWindow):
         setattr(self, attr, sa)
         return sa
 
-    def _build_steps_card(self) -> QWidget:
-        card = QFrame()
-        card.setProperty("card", True)
-        card.setFixedWidth(LEFT_COL_W)
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(0, 12, 0, 12)
-        lay.setSpacing(8)
-        head = QHBoxLayout()
-        head.setContentsMargins(16, 0, 10, 0)
-        head.setSpacing(4)
-        title = label(tr("Steps"), "title")
-        head.addWidget(title)
+    def _build_steps_col(self) -> QWidget:
+        col = QWidget()
+        col.setFixedWidth(LEFT_COL_W)
+        lay = QVBoxLayout(col)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        head = QWidget()
+        head.setFixedHeight(32)
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        hl.addWidget(label(tr("Steps"), "section"))
         self.step_count = label("0", "count")
-        head.addWidget(self.step_count)
-        head.addStretch(1)
-        self.btn_dup = icon_button("copy", tr("Duplicate"), "ghost", "sm", self.duplicate_step, "tx2")
-        self.btn_up = icon_button("up", tr("Move up"), "ghost", "sm", lambda: self.move_step(-1), "tx2")
-        self.btn_down = icon_button("down", tr("Move down"), "ghost", "sm", lambda: self.move_step(1), "tx2")
-        self.btn_del = icon_button("trash", tr("Delete"), "ghost", "sm", self.delete_step, "tx2")
-        for b in (self.btn_dup, self.btn_up, self.btn_down, self.btn_del):
-            head.addWidget(b)
-        lay.addLayout(head)
+        hl.addWidget(self.step_count)
+        hl.addStretch(1)
+        lay.addWidget(head)
         self.step_list = StepList()
         self.step_list.currentRowChanged.connect(self._on_row_changed)
         self.step_list.itemChanged.connect(self._on_item_changed)
         self.step_list.model().rowsMoved.connect(self._on_rows_moved)
-        lay2 = QVBoxLayout()
-        lay2.setContentsMargins(12, 0, 12, 0)
-        lay2.addWidget(self.step_list)
-        lay.addLayout(lay2, 1)
-        addbox = QVBoxLayout()
-        addbox.setContentsMargins(12, 0, 12, 0)
-        self.btn_add = QPushButton(tr("Add step (select a target)"))
+        lay.addWidget(self.step_list, 1)
+        self.btn_add = QPushButton(tr("Add step"))
         self.btn_add.setProperty("add", True)
         self.btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
-        set_icon(self.btn_add, "select", "ac_tx", 18)
-        self.btn_add.clicked.connect(self.add_step)
-        addbox.addWidget(self.btn_add)
-        lay.addLayout(addbox)
-        return card
+        self.btn_add.setToolTip(tr("Add a step and select its target on the screen right away."))
+        set_icon(self.btn_add, "add", "tx2", 16)
+        self.btn_add.clicked.connect(self.add_step_and_select)
+        lay.addWidget(self.btn_add)
+        return col
 
     # ---------------------------------------------------------------- step page (simple) and global page (advanced)
 
     def _build_step_page(self) -> QWidget:
         page = QWidget()
         self.step_page_lay = QVBoxLayout(page)
-        self.step_page_lay.setContentsMargins(0, 0, 8, 0)
-        self.step_page_lay.setSpacing(16)
+        self.step_page_lay.setContentsMargins(0, 0, 0, 0)
+        self.step_page_lay.setSpacing(24)
         self.step_editor = StepEditor()
         self.step_editor.changed.connect(self._on_step_edited)
         self.step_editor.capture_requested.connect(self.capture_step_template)
@@ -319,46 +339,52 @@ class MainWindow(QMainWindow):
         self.step_editor.guard_capture_requested.connect(self.capture_step_guard)
         self.chk_manual = self.step_editor.chk_manual
         self.chk_manual.toggled.connect(self._apply_settings)
-        self.step_page_lay.addWidget(self.step_editor)
+        self.step_page_lay.addWidget(self.step_editor, 1)
         self.run_card = self._build_run_card()
         self.step_page_lay.addWidget(self.run_card)
-        self.step_page_lay.addStretch(1)
         return page
 
     def _build_run_card(self) -> QWidget:
-        card = QFrame()
-        card.setProperty("card", True)
+        """Speed, Repeat and Click limit as three compact rows with the 88 px label column."""
+        card = QWidget()
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(16, 14, 16, 16)
-        lay.setSpacing(14)
-        lay.addWidget(label(tr("Run settings"), "title"))
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
 
-        # speed -------------------------------------------------------------
-        self.speed_seg = Segmented()
+        # speed: segmented presets, the slider under them, one line of explanation
+        self.speed_seg = Segmented(fill=False)
         for v, name in ((0, tr("Slow")), (50, tr("Medium")), (100, tr("Fast"))):
             self.speed_seg.addItem(f"{name} · {display_interval(v):.2f} s", v)
         self.speed_seg.currentIndexChanged.connect(self._on_speed_preset)
-        self.lbl_slow = label(tr("Slow ({s:g} s)", s=SLOW_INTERVAL), "hint")
+        self.lbl_slow = label(tr("Slow ({s:g} s)", s=SLOW_INTERVAL), "hint")  # (not shown: the segments carry the numbers)
         self.lbl_fast = label(tr("Fast"), "hint")
         self.speed_slider = SafeSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(0, 100)
         self.speed_slider.setToolTip(tr("How long from one click to the next. Right = fastest (no added delay), "
                                         "left = slowest ({s:g} s between clicks).", s=SLOW_INTERVAL))
         self.lbl_speed = label("", "hint", True)
-        srow = QHBoxLayout()
-        srow.setSpacing(10)
-        srow.addWidget(self.lbl_slow)
-        srow.addWidget(self.speed_slider, 1)
-        srow.addWidget(self.lbl_fast)
-        speed_box = QVBoxLayout()
-        speed_box.setSpacing(8)
-        speed_box.addWidget(label(tr("Speed"), "field"))
-        speed_box.addWidget(self.speed_seg)
-        speed_box.addLayout(srow)
-        speed_box.addWidget(self.lbl_speed)
+        speed = QVBoxLayout()
+        speed.setSpacing(6)
+        r1 = QHBoxLayout()
+        r1.setSpacing(12)
+        r1.addWidget(row_label(tr("Speed")), 0, Qt.AlignmentFlag.AlignVCenter)
+        r1.addWidget(self.speed_seg, 0, Qt.AlignmentFlag.AlignVCenter)
+        r1.addStretch(1)
+        speed.addLayout(r1)
+        r2 = QHBoxLayout()
+        r2.setSpacing(0)
+        r2.addSpacing(LABEL_COL_W + 12)
+        r2.addWidget(self.speed_slider, 1)
+        speed.addLayout(r2)
+        r3 = QHBoxLayout()
+        r3.setSpacing(0)
+        r3.addSpacing(LABEL_COL_W + 12)
+        r3.addWidget(self.lbl_speed, 1)
+        speed.addLayout(r3)
+        lay.addLayout(speed)
 
-        # repeat ------------------------------------------------------------
-        self.repeat_seg = Segmented()
+        # repeat
+        self.repeat_seg = Segmented(fill=False)
         self.repeat_seg.addItem(tr("N times"), False)
         self.repeat_seg.addItem(tr("Infinite"), True)
         self.s_infinite = _InfiniteProxy(self.repeat_seg)
@@ -366,41 +392,32 @@ class MainWindow(QMainWindow):
         self.s_loops.setRange(1, 1_000_000)
         self.s_loops.setSuffix(" " + tr("times"))
         self.s_loops.setKeyboardTracking(True)
-        self.lbl_repeat = label("", "hint", True)
-        repeat_box = QVBoxLayout()
-        repeat_box.setSpacing(8)
-        repeat_box.addWidget(label(tr("Repeat"), "field"))
-        repeat_box.addWidget(self.repeat_seg)
-        repeat_box.addWidget(self.s_loops)
-        repeat_box.addWidget(self.lbl_repeat)
-        repeat_box.addStretch(1)
+        self.s_loops.setMinimumWidth(130)
+        self.lbl_repeat = label("", "hint")
+        rep = QHBoxLayout()
+        rep.setSpacing(12)
+        rep.addWidget(row_label(tr("Repeat")), 0, Qt.AlignmentFlag.AlignVCenter)
+        rep.addWidget(self.repeat_seg, 0, Qt.AlignmentFlag.AlignVCenter)
+        rep.addWidget(self.s_loops, 0, Qt.AlignmentFlag.AlignVCenter)
+        rep.addWidget(self.lbl_repeat, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(rep)
 
-        top = QHBoxLayout()
-        top.setSpacing(28)
-        top.addLayout(speed_box, 3)
-        top.addLayout(repeat_box, 2)
-        lay.addLayout(top)
-        lay.addWidget(hline())
-
-        # click limit ---------------------------------------------------------
-        self.max_row = SwitchRow(tr("Click limit"), tr("Stops automatically when reached"))
+        # click limit
+        self.max_row = SwitchRow(tr("Stops automatically when reached"))
+        self.max_row.title.setProperty("role", "muted")
         self.s_maxclicks = SafeSpinBox()
         self.s_maxclicks.setRange(0, 1_000_000)
         self.s_maxclicks.setSpecialValueText(tr("No limit"))
         self.s_maxclicks.setSuffix(" " + tr("clicks"))
         self.s_maxclicks.setKeyboardTracking(True)
-        self.s_maxclicks.setMinimumWidth(150)
-        mrow = QHBoxLayout()
-        mrow.addWidget(self.max_row, 1)
-        mrow.addWidget(self.s_maxclicks)
-        lay.addLayout(mrow)
+        self.s_maxclicks.setMinimumWidth(130)
+        lim = QHBoxLayout()
+        lim.setSpacing(12)
+        lim.addWidget(row_label(tr("Click limit")), 0, Qt.AlignmentFlag.AlignVCenter)
+        lim.addWidget(self.s_maxclicks, 0, Qt.AlignmentFlag.AlignVCenter)
+        lim.addWidget(self.max_row, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(lim)
         self.max_row.switch.toggled.connect(self._on_max_switch)
-
-        # multi-display hint ----------------------------------------------------
-        self.multi_alert = Alert("", "info", tr("Manage"))
-        self.multi_alert.action.clicked.connect(self._open_global_tab)
-        self.multi_alert.setVisible(False)
-        lay.addWidget(self.multi_alert)
 
         self.speed_slider.valueChanged.connect(self._apply_settings)
         for w in (self.s_loops, self.s_maxclicks):
@@ -409,14 +426,25 @@ class MainWindow(QMainWindow):
         return card
 
     def _build_global_page(self) -> QWidget:
+        """Advanced > Global: two columns. The run rows (speed / repeat / click limit) are moved in at the top of the left one."""
         page = QWidget()
-        self.global_lay = QVBoxLayout(page)
-        self.global_lay.setContentsMargins(0, 0, 8, 0)
-        self.global_lay.setSpacing(16)
-        self.global_slot_index = 0  # the run card is inserted here in advanced mode
+        self.global_lay = QVBoxLayout(page)  # the run card is inserted at index 0 in advanced mode, above the columns
+        self.global_lay.setContentsMargins(0, 0, 0, 0)
+        self.global_lay.setSpacing(24)
+        cols = QHBoxLayout()
+        cols.setSpacing(32)
+        self.global_left = QVBoxLayout()
+        self.global_left.setSpacing(24)
+        self.global_right = QVBoxLayout()
+        self.global_right.setSpacing(24)
+        cols.addLayout(self.global_left, 1)
+        cols.addLayout(self.global_right, 1)
+        self.global_lay.addLayout(cols)
+        self.global_lay.addStretch(1)
+        self.global_slot_index = 0
 
         # stop & limits ---------------------------------------------------------
-        g = Group(tr("Stop & limits"))
+        g = Group(tr("Stop & limits"), flat=True)
         self.s_idle = SafeSpinBox()
         self.s_idle.setRange(0, 100000)
         self.s_idle.setSpecialValueText(tr("Never"))
@@ -438,10 +466,10 @@ class MainWindow(QMainWindow):
         self.s_corner = self.corner_row.switch
         g.add(self.corner_row)
         self.grp_limits = g
-        self.global_lay.addWidget(g)
+        self.global_left.addWidget(g)
 
         # timing & display -------------------------------------------------------
-        g = Group(tr("Timing & display"))
+        g = Group(tr("Timing & display"), flat=True)
         self.s_jitter = SafeDoubleSpinBox()
         self.s_jitter.setRange(0, 100)
         self.s_jitter.setSuffix(" %")
@@ -471,17 +499,17 @@ class MainWindow(QMainWindow):
         self.s_minimize = self.minimize_row.switch
         g.add(self.minimize_row)
         self.grp_timing = g
-        self.global_lay.addWidget(g)
+        self.global_right.addWidget(g)
 
         # end condition -------------------------------------------------------------
         self.end_editor = EndConditionEditor()
         self.end_editor.changed.connect(self._mark_dirty)
         self.end_editor.capture_requested.connect(self.capture_end_template)
         self.end_editor.region_requested.connect(self.pick_end_region)
-        self.global_lay.addWidget(self.end_editor)
+        self.global_right.addWidget(self.end_editor)
 
         # display presets -------------------------------------------------------------
-        g = Group(tr("Display presets"))
+        g = Group(tr("Display presets"), flat=True)
         g.add(label(tr("Save different search areas per screen resolution."), "hint", True))
         self.preset_combo = SafeComboBox()
         self.preset_combo.setToolTip(tr("A preset stores the search areas (and optionally target images) for one display "
@@ -490,11 +518,12 @@ class MainWindow(QMainWindow):
         self.btn_preset_new = button(tr("New"), on_click=self.new_preset)
         self.btn_preset_rename = button(tr("Rename"), on_click=self.rename_preset)
         self.btn_preset_delete = button(tr("Delete"), on_click=self.delete_preset)
+        g.add(self.preset_combo)
         prow = QHBoxLayout()
         prow.setSpacing(8)
-        prow.addWidget(self.preset_combo, 1)
         for b in (self.btn_preset_new, self.btn_preset_rename, self.btn_preset_delete):
             prow.addWidget(b)
+        prow.addStretch(1)
         g.add(prow)
         self.auto_row = SwitchRow(tr("Auto-switch by detected resolution"))
         self.auto_row.setToolTip(tr("At the start of a run, ClickFlow detects the connected monitors and picks the preset "
@@ -503,23 +532,22 @@ class MainWindow(QMainWindow):
         self.chk_auto_preset.toggled.connect(self._apply_settings)
         g.add(self.auto_row)
         self.lbl_displays = label("", "hint", True)
-        self.btn_detect = button(tr("Detect again"), "refresh", on_click=self._refresh_displays_label)
-        drow = QHBoxLayout()
-        drow.addWidget(self.lbl_displays, 1)
-        drow.addWidget(self.btn_detect)
-        g.add(drow)
+        self.btn_detect = button(tr("Detect again"), on_click=self._refresh_displays_label)
+        g.add(self.lbl_displays)
+        g.add(self.btn_detect)
         self.preset_bar = g
-        self.global_lay.addWidget(g)
+        self.global_left.addWidget(g)
 
         # notes -------------------------------------------------------------------------
-        g = Group(tr("Profile notes"))
+        g = Group(tr("Profile notes"), flat=True)
         self.notes = QPlainTextEdit()
         self.notes.setPlaceholderText(tr("Notes about this profile..."))
         self.notes.setMinimumHeight(90)
         self.notes.textChanged.connect(self._on_notes_changed)
         g.add(self.notes)
-        self.global_lay.addWidget(g)
-        self.global_lay.addStretch(1)
+        self.global_right.addWidget(g)
+        self.global_left.addStretch(1)
+        self.global_right.addStretch(1)
 
         for w in (self.s_idle, self.s_jitter, self.s_start_delay, self.s_scan):
             w.valueChanged.connect(self._apply_settings)
@@ -532,39 +560,40 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- dashboard (shown while running)
 
     def _build_dashboard(self) -> QWidget:
+        """Running: the status word first, then progress, four figures, one match line and one notice. No boxes."""
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 8, 0)
-        lay.setSpacing(16)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(24)
 
-        head = QFrame()
-        head.setProperty("card", True)
-        hl = QVBoxLayout(head)
-        hl.setContentsMargins(20, 16, 20, 16)
-        hl.setSpacing(10)
         top = QHBoxLayout()
+        top.setSpacing(16)
         self.dash_pill = Pill("run", tr("Running"), big=True)
         top.addWidget(self.dash_pill)
-        self.dash_text = label("", "muted")
-        top.addWidget(self.dash_text, 1)
+        top.addStretch(1)
         self.dash_stop_hint = label("", "hint")
-        top.addWidget(self.dash_stop_hint)
-        hl.addLayout(top)
+        top.addWidget(self.dash_stop_hint, 0, Qt.AlignmentFlag.AlignBottom)
+        lay.addLayout(top)
+        self.dash_text = label("", "muted")
+        lay.addWidget(self.dash_text)
+
+        prog = QVBoxLayout()
+        prog.setSpacing(6)
         self.dash_progress = QProgressBar()
         self.dash_progress.setRange(0, 1000)
         self.dash_progress.setTextVisible(False)
-        hl.addWidget(self.dash_progress)
+        prog.addWidget(self.dash_progress)
         prow = QHBoxLayout()
-        self.dash_prog_l = label("", "muted")
-        self.dash_prog_r = label("", "muted")
+        self.dash_prog_l = label("", "hint")
+        self.dash_prog_r = label("", "hint")
         prow.addWidget(self.dash_prog_l)
         prow.addStretch(1)
         prow.addWidget(self.dash_prog_r)
-        hl.addLayout(prow)
-        lay.addWidget(head)
+        prog.addLayout(prow)
+        lay.addLayout(prog)
 
         tiles = QHBoxLayout()
-        tiles.setSpacing(12)
+        tiles.setSpacing(24)
         self.tile_clicks = Tile(tr("Clicks"))
         self.tile_loops = Tile(tr("Loops"))
         self.tile_time = Tile(tr("Elapsed"))
@@ -573,28 +602,23 @@ class MainWindow(QMainWindow):
             tiles.addWidget(t, 1)
         lay.addLayout(tiles)
 
-        mc = QFrame()
-        mc.setProperty("card", True)
-        ml = QVBoxLayout(mc)
-        ml.setContentsMargins(20, 14, 20, 16)
-        ml.setSpacing(8)
+        # one match line + a thin confidence bar
+        ml = QVBoxLayout()
+        ml.setSpacing(6)
         mh = QHBoxLayout()
-        mh.addWidget(label(tr("Latest match"), "title"))
+        mh.setSpacing(10)
+        mh.addWidget(label(tr("Latest match"), "field"))
         self.match_tag = tag("", "ok")
         self.match_tag.setVisible(False)
         mh.addWidget(self.match_tag)
+        self.match_name = label(tr("No match yet"), "section")
+        mh.addWidget(self.match_name)
         mh.addStretch(1)
         self.match_pos = label("", "mono")
         mh.addWidget(self.match_pos)
-        ml.addLayout(mh)
-        nr = QHBoxLayout()
-        self.match_name = label(tr("No match yet"), "")
-        self.match_name.setStyleSheet("font-weight: 600;")
         self.match_val = label("", "mono")
-        nr.addWidget(self.match_name)
-        nr.addStretch(1)
-        nr.addWidget(self.match_val)
-        ml.addLayout(nr)
+        mh.addWidget(self.match_val)
+        ml.addLayout(mh)
         self.match_meter = MatchMeter()
         ml.addWidget(self.match_meter)
         sr = QHBoxLayout()
@@ -605,7 +629,7 @@ class MainWindow(QMainWindow):
         sr.addStretch(1)
         sr.addWidget(label("1.00", "hint"))
         ml.addLayout(sr)
-        lay.addWidget(mc)
+        lay.addLayout(ml)
         lay.addWidget(Alert(tr("Target thumbnails are hidden while running so the matcher cannot find them on screen."), "info"))
         lay.addStretch(1)
         return page
@@ -613,102 +637,82 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- empty state
 
     def _build_empty_state(self) -> QWidget:
+        """Heading, one sentence, one primary button, three numbered columns."""
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.addStretch(1)
         col = QVBoxLayout()
-        col.setSpacing(14)
+        col.setSpacing(16)
         col.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        logo = QLabel()
-        logo.setFixedSize(72, 72)
-        try:
-            from ..app import resource_root
-
-            pm = QPixmap(str(resource_root() / "assets" / "icon.png"))
-            if not pm.isNull():
-                logo.setPixmap(pm.scaled(144, 144, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                logo.setScaledContents(True)
-        except Exception:
-            pass
-        col.addWidget(logo, 0, Qt.AlignmentFlag.AlignHCenter)
         h = label(tr("Let it click for you"), "h1")
         h.setAlignment(Qt.AlignmentFlag.AlignCenter)
         col.addWidget(h)
         sub = label(tr("Select a small image on screen (the target). ClickFlow keeps looking for it and clicks it."), "muted", True)
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        col.addWidget(sub)
+        sub.setFixedWidth(560)
+        sub.setFixedHeight(sub.heightForWidth(560) + 4)
+        col.addWidget(sub, 0, Qt.AlignmentFlag.AlignHCenter)
+        btns = QHBoxLayout()
+        btns.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.btn_empty_add = button(tr("Add step"), "", "primary", "lg", on_click=self.add_step_and_select)
+        btns.addWidget(self.btn_empty_add)
+        col.addLayout(btns)
+        col.addSpacing(16)
         steps = QHBoxLayout()
-        steps.setSpacing(12)
+        steps.setSpacing(40)
         steps.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        data = (("select", tr("Select a target"), tr("Drag a box around the button or icon you want clicked.")),
-                ("sliders", tr("Pick speed and repeats"), tr("Three speeds; click N times or loop forever.")),
-                ("play", tr("Press Start"), tr("Stop any time with the hotkey. No risk of clicking too long.")))
-        for i, (ic, title, desc) in enumerate(data, 1):
-            c = QFrame()
-            c.setProperty("card", True)
-            c.setFixedWidth(250)
+        data = ((tr("Select a target"), tr("Drag a box around the button or icon you want clicked.")),
+                (tr("Pick speed and repeats"), tr("Three speeds; click N times or loop forever.")),
+                (tr("Press Start"), tr("Stop any time with the hotkey. No risk of clicking too long.")))
+        for i, (title, desc) in enumerate(data, 1):
+            c = QWidget()
+            c.setFixedWidth(230)
             cl = QVBoxLayout(c)
-            cl.setContentsMargins(18, 16, 18, 16)
-            cl.setSpacing(6)
-            r = QHBoxLayout()
-            badge = QFrame()
-            badge.setProperty("gi", "ac")
-            badge.setFixedSize(36, 36)
-            bl = QHBoxLayout(badge)
-            bl.setContentsMargins(0, 0, 0, 0)
-            g = QLabel()
-            g.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            g.setPixmap(icons.pixmap(ic, theme.tok("ac_tx"), 20, 2.0, 1.6))
-            bl.addWidget(g)
-            r.addWidget(badge)
-            r.addWidget(tag(str(i), "ac"))
-            r.addStretch(1)
-            cl.addLayout(r)
-            t = label(title)
-            t.setStyleSheet("font-weight: 600; font-size: 14px;")
-            cl.addWidget(t)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(4)
+            cl.addWidget(label(str(i), "hint"))
+            cl.addWidget(label(title, "section"))
             cl.addWidget(label(desc, "muted", True))
             cl.addStretch(1)
             steps.addWidget(c)
         col.addLayout(steps)
-        btns = QHBoxLayout()
-        btns.setSpacing(10)
-        btns.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.btn_empty_add = button(tr("Add step (select a target)"), "select", "primary", "lg", on_click=self.add_step)
-        self.btn_empty_example = button(tr("Open the example profile"), "folder", "", "lg", on_click=self.open_example)
-        btns.addWidget(self.btn_empty_add)
-        btns.addWidget(self.btn_empty_example)
-        col.addLayout(btns)
+        ex = QHBoxLayout()
+        ex.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.btn_empty_example = button(tr("Open the example profile"), "", "link", on_click=self.open_example)
+        ex.addWidget(self.btn_empty_example)
+        col.addSpacing(8)
+        col.addLayout(ex)
         outer.addLayout(col)
         outer.addStretch(2)
         return page
 
-    # ---------------------------------------------------------------- log drawer and dock
+    # ---------------------------------------------------------------- log panel (dark code surface) and bottom bar
 
     def _build_log_drawer(self) -> QWidget:
         box = QFrame()
         box.setObjectName("logdrawer")
+        self.log_drawer = box
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         head = QHBoxLayout()
-        head.setContentsMargins(12, 4, 12, 4)
+        head.setContentsMargins(24, 10, 16, 0)
         head.setSpacing(8)
-        self.log_toggle = QToolButton()
-        self.log_toggle.setProperty("logtoggle", True)
-        self.log_toggle.setText("  " + tr("Live log"))
-        self.log_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.log_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.log_toggle.clicked.connect(lambda: self._set_log_open(not self.log_view.isVisible()))
-        head.addWidget(self.log_toggle)
-        self.log_count = label("0", "count")
+        dim = f"color: {theme.tok('lg_t')};"
+        title = label(tr("Live log"))
+        title.setStyleSheet(dim + " font-size: 13px;")
+        head.addWidget(title)
+        self.log_count = label("0")
+        self.log_count.setStyleSheet(dim + " font-size: 13px;")
         head.addWidget(self.log_count)
-        self.log_last = label("", "mono")
-        self.log_last.setStyleSheet("color: " + theme.tok("tx3") + ";")
-        self.log_last.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        head.addWidget(self.log_last, 1)
+        self.log_last = label("")  # (kept for callers; the panel itself shows the lines)
+        self.log_last.setVisible(False)
+        head.addStretch(1)
         self.btn_log_clear = button(tr("Clear"), variant="ghost", size="sm", on_click=self._clear_log)
+        self.btn_log_clear.setStyleSheet(
+            f"QPushButton {{ color: {theme.tok('lg_t')}; }}"
+            f"QPushButton:hover {{ color: {theme.tok('lg_i')}; background: rgba(250,249,245,0.12); }}")
         head.addWidget(self.btn_log_clear)
         lay.addLayout(head)
         self.log_view = QPlainTextEdit()
@@ -716,15 +720,15 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(3000)
         self.log_view.setFixedHeight(150)
-        self.log_view.setVisible(False)
         lay.addWidget(self.log_view)
         self._log_n = 0
-        self._set_log_open(False)
+        box.setVisible(False)
         return box
 
     def _set_log_open(self, on: bool) -> None:
-        self.log_view.setVisible(on)
-        set_icon(self.log_toggle, "chevd" if on else "chevu", "tx2", 14)
+        self.log_drawer.setVisible(on)
+        if hasattr(self, "log_toggle"):
+            self.log_toggle.setChecked(on)
 
     def _clear_log(self) -> None:
         self._log_entries.clear()
@@ -736,16 +740,26 @@ class MainWindow(QMainWindow):
     def _build_dock(self) -> QWidget:
         dock = QFrame()
         dock.setObjectName("dock")
-        dock.setFixedHeight(64)
+        dock.setFixedHeight(72)
         row = QHBoxLayout(dock)
-        row.setContentsMargins(16, 0, 16, 0)
+        row.setContentsMargins(24, 0, 24, 0)
         row.setSpacing(12)
         self.pill = Pill("idle", tr("Idle"))
         row.addWidget(self.pill)
         self.dock_hint = label("", "hint")
         self.dock_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         row.addWidget(self.dock_hint, 1)
-        self.btn_dry = button(tr("Dry run (no clicks)"), "dry", size="lg", on_click=lambda: self.start_run(dry=True))
+        self.log_toggle = QToolButton()
+        self.log_toggle.setProperty("logtoggle", True)
+        self.log_toggle.setText(tr("Log"))
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setToolTip(tr("Live log"))
+        self.log_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.log_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        set_icon(self.log_toggle, "log", "tx2", 16)
+        self.log_toggle.toggled.connect(lambda on: self.log_drawer.setVisible(on))
+        row.addWidget(self.log_toggle)
+        self.btn_dry = button(tr("Dry run (no clicks)"), size="lg", on_click=lambda: self.start_run(dry=True))
         self.btn_dry.setToolTip(tr("Looks for the targets and draws boxes, but never clicks.") + "  Ctrl+D")
         self.btn_start = button(tr("Start"), "play", "primary", "lg", on_click=self._start_or_stop)
         self.btn_start.setMinimumWidth(130)
@@ -780,6 +794,10 @@ class MainWindow(QMainWindow):
         self.act_run = act(tr("Start"), lambda: self.start_run(dry=False), "Ctrl+R")
         self.act_dry = act(tr("Dry run (no clicks)"), lambda: self.start_run(dry=True), "Ctrl+D")
         self.act_stop = act(tr("Stop"), self.stop_run, "Ctrl+.")
+        self.act_dup = act(tr("Duplicate step"), self.duplicate_step)
+        self.act_up = act(tr("Move step up"), lambda: self.move_step(-1))
+        self.act_down = act(tr("Move step down"), lambda: self.move_step(1))
+        self.act_del = act(tr("Delete step"), self.delete_step)
 
     def _recent_profiles(self, limit: int = 8) -> list[tuple[str, Path]]:
         out: list[tuple[float, str, Path]] = []
@@ -815,9 +833,26 @@ class MainWindow(QMainWindow):
             a.setIcon(icons.icon(ic, theme.tok("tx2"), 16))
             m.addAction(a)
         m.addSeparator()
-        for a, ic in ((self.act_import, "export"), (self.act_export, "export"), (self.act_saveas, "save")):
+        for a, ic in ((self.act_save, "save"), (self.act_saveas, "save"), (self.act_import, "export"), (self.act_export, "export")):
             a.setIcon(icons.icon(ic, theme.tok("tx2"), 16))
             m.addAction(a)
+
+    def _fill_more_menu(self) -> None:
+        """The "more" menu: step actions, display presets, profile notes, about."""
+        m = self.more_menu
+        m.clear()
+        row, n = self.step_list.currentRow(), self.step_list.count()
+        have = row >= 0 and not self._running
+        for act, ok in ((self.act_dup, have), (self.act_up, have and row > 0), (self.act_down, have and row < n - 1),
+                        (self.act_del, have)):
+            act.setEnabled(ok)
+            m.addAction(act)
+        m.addSeparator()
+        if self.profile.notes.strip():
+            m.addAction(tr("Profile notes"), self._show_notes)
+        m.addSeparator()
+        m.addAction(tr("About & safety").replace("&", "&&"), self.show_about)
+        m.addAction(tr("Open-source licenses"), self.show_licenses)
 
     def _open_recent(self, path: Path) -> None:
         if self._running or not self._confirm_discard():
@@ -851,42 +886,62 @@ class MainWindow(QMainWindow):
     def _open_global_tab(self) -> None:
         if not self._advanced:
             self.set_mode(True)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(3)
 
     def _on_tab_changed(self, i: int) -> None:
         if self._running:
             return
         self.tabs.setVisible(self._advanced)
-        # simple mode has a single page; advanced mode shows the tab that is selected
-        self.right_stack.setCurrentIndex(i if self._advanced else 0)
-
-    def _toggle_theme(self) -> None:
-        theme.toggle()
-        set_icon(self.btn_theme, "moon" if theme.mode() == "light" else "sun", "tx2", 16)
-        self._thumb_cache.clear()
-        self._refresh_items()
+        # simple mode has a single page; advanced mode: tabs 0-2 are sections of the step editor, tab 3 is Global
+        glob = self._advanced and i == 3
+        self.right_stack.setCurrentIndex(1 if glob else 0)
+        self.step_editor.set_section(i if self._advanced and i < 3 else 0)
 
     def _toggle_language(self) -> None:
         if self._running:
             return
         i18n.set_language("en" if i18n.language() == "zh" else "zh")
-        self._rebuild_ui()
+        self._rebuild_ui()  # (also restyles: the stylesheet depends on the language)
+
+    def _profile_fingerprint(self) -> str:
+        try:
+            return json.dumps(self.profile.to_dict(), sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(id(object()))  # (cannot compare: treat as changed)
 
     def _rebuild_ui(self) -> None:
-        """Rebuild every caption in the other language: the widget tree is cheap to recreate and keeps no stale text."""
+        """Rebuild every caption in the other language: the widget tree is cheap to recreate and keeps no stale text.
+
+        Done in the order that is quickest and that never shows a half-built window: painting is frozen, the old tree is
+        destroyed at once (nothing left to restyle), the new tree is built without a stylesheet, and the stylesheet is
+        applied once to the finished tree. The user sees the old window, then the new one."""
+        import shiboken6
+
+        was_dirty, before = self.dirty, self._profile_fingerprint()
         self._flush_pending_edits()
-        dirty, row, tab, entries = self.dirty, self.step_list.currentRow(), self.tabs.currentIndex(), list(self._log_entries)
-        self._build_ui()
-        self._build_actions()
-        self.load_into_ui(self.profile, rebuild=True)
-        self.dirty = dirty
-        self.tabs.setCurrentIndex(tab)
-        if 0 <= row < self.step_list.count():
-            self.step_list.setCurrentRow(row)
-        for stamp, text, level, kind in entries:
-            self._add_log_line(stamp, text, level, kind)
-        self._refresh_title()
-        self._set_running(False)
+        # committing the editors always reports "changed"; it only counts if a typed value really changed the profile
+        dirty = self.dirty if self._profile_fingerprint() != before else was_dirty
+        row, tab, entries = self.step_list.currentRow(), self.tabs.currentIndex(), list(self._log_entries)
+        self.setUpdatesEnabled(False)
+        try:
+            old = self.takeCentralWidget()
+            if old is not None:
+                shiboken6.delete(old)
+            theme.clear_stylesheet()
+            self._build_ui()
+            self._build_actions()
+            self.load_into_ui(self.profile, rebuild=True)
+            theme.apply()  # styles the new tree once, in the new language
+            self.dirty = dirty
+            self.tabs.setCurrentIndex(tab)
+            if 0 <= row < self.step_list.count():
+                self.step_list.setCurrentRow(row)
+            for stamp, text, level, kind in entries:
+                self._add_log_line(stamp, text, level, kind)
+            self._refresh_title()
+            self._set_running(False)
+        finally:
+            self.setUpdatesEnabled(True)
 
     # ================================================================== logging
 
@@ -897,8 +952,7 @@ class MainWindow(QMainWindow):
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(theme.tok(key)))
         if kind in ("start", "finished"):
-            fmt.setForeground(QColor(theme.tok("tx")))
-            fmt.setFontWeight(600)
+            fmt.setForeground(QColor(theme.tok("lg_i")))  # start / finished lines stand out by colour, not by weight
         return fmt
 
     def append_log(self, text: str, level: str = "info", kind: str = "") -> None:
@@ -912,7 +966,7 @@ class MainWindow(QMainWindow):
         cur = self.log_view.textCursor()
         cur.movePosition(QTextCursor.MoveOperation.End)
         ts = QTextCharFormat()
-        ts.setForeground(QColor(theme.tok("tx3")))
+        ts.setForeground(QColor(theme.tok("lg_t")))
         cur.insertText(f"{stamp}  ", ts)
         cur.insertText(text + "\n", self._log_format(level, kind))
         self.log_view.setTextCursor(cur)
@@ -1008,10 +1062,12 @@ class MainWindow(QMainWindow):
             self.pill.set_state("cdn", tr("Starting in {n} s", n=left))
             self.dash_pill.set_state("cdn", tr("Starting in {n} s", n=left))
             self.dash_text.setText(tr("Switch to your target window now."))
+            self.stop_badge.set_status(tr("Starting in {n} s", n=left))
         else:
             self.pill.set_state("dry" if st["dry"] else "run", mode)
             self.dash_pill.set_state("dry" if st["dry"] else "run", mode)
             self.dash_text.setText(tr("Working through {n} step(s) in order", n=st["total"]))
+            self.stop_badge.set_status(tr("{mode} \u00b7 {n} clicks", mode=mode, n=st["clicks"]))
 
     # ================================================================== profile <-> UI
 
@@ -1059,7 +1115,7 @@ class MainWindow(QMainWindow):
         self._set_monitor_combo(s.monitor)
         self._refresh_speed_ui()
         self._refresh_empty()
-        if self._hotkey_enabled and not rebuild:
+        if self._hotkey_enabled and not rebuild and not self._defer_hotkey:
             self._start_hotkey()
 
     def _set_monitor_combo(self, idx: int) -> None:
@@ -1102,7 +1158,7 @@ class MainWindow(QMainWindow):
         if not self.profile.steps and not self._running:
             self.dock_hint.setText(tr("Add a step to get started"))
         else:
-            self.dock_hint.setText(tr("Press {key} to stop \u00b7 moving the mouse into a corner also stops", key=key))
+            self.dock_hint.setText(tr("Stop any time: {key}, or a screen corner.", key=key))
 
     _TAGS = None
 
@@ -1132,7 +1188,7 @@ class MainWindow(QMainWindow):
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled
                       | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         item.setCheckState(Qt.CheckState.Checked if step.enabled else Qt.CheckState.Unchecked)
-        item.setSizeHint(QSize(0, 72))
+        item.setSizeHint(QSize(0, ROW_H))
         self._style_item(item, step)
         return item
 
@@ -1143,7 +1199,7 @@ class MainWindow(QMainWindow):
         if not tpl:
             tags.append((tr("No target"), "er"))
         elif effective_region(step, self.active_preset) is None:
-            tags.append((tr("No search area"), "wn"))
+            tags.append((tr("No search area"), ""))  # (advice, not an error: shown in the editor, not on the row)
         if step.click_only_if_found:
             tags.append((tr("Optional"), ""))
         if step.ignore_background:
@@ -1151,7 +1207,7 @@ class MainWindow(QMainWindow):
         if step.fallback_click_last:
             tags.append((tr("Fallback click"), "" if step.guard_template else "wn"))
         if step.click_type != "left":
-            tags.append((tr("Right-click") if step.click_type == "right" else tr("Double-click"), ""))
+            tags.append((tr("Right-click") if step.click_type == "right" else tr("Double-click"), "wn"))
         suffix = f"   [{', '.join(t for t, _ in tags)}]" if tags else ""
         item.setText(f"{idx}. {step.name}{suffix}")  # also the accessible / searchable text (the delegate paints the card)
         item.setData(ROLE_VIEW, {"index": idx, "name": step.name, "tags": tags, "thumb": self._thumb_for(step),
@@ -1173,8 +1229,6 @@ class MainWindow(QMainWindow):
         notes = self.profile.notes.strip()
         first = notes if len(notes) <= 420 else notes[:420] + "..."
         self.banner.setText(first)
-        self.btn_notes.setVisible(bool(notes))
-        self.btn_notes.setToolTip(first)
 
     def _show_notes(self) -> None:
         dialogs.message(self, "if", tr("Profile notes"), self.profile.notes.strip())
@@ -1183,13 +1237,10 @@ class MainWindow(QMainWindow):
         star = " *" if self.dirty else ""
         self.setWindowTitle(f"ClickFlow - {self.profile.name}{star}")
         self.profile_btn.setText(self.profile.name)
-        self.profile_btn.setToolTip(str(self.profile.directory) if self.profile.directory else tr("unsaved profile"))
-        if self.dirty:
-            self.save_state.setText("\u25cf " + tr("Unsaved"))
-            self.save_state.setStyleSheet("color: " + theme.tok("wn") + ";")
-        else:
-            self.save_state.setText("\u2713 " + tr("Saved"))
-            self.save_state.setStyleSheet("color: " + theme.tok("ok") + ";")
+        # unsaved changes: a coral dot on the profile name (nothing at all when everything is saved)
+        self.profile_btn.setIcon(self._dot_icon() if self.dirty else QIcon())
+        where = str(self.profile.directory) if self.profile.directory else tr("unsaved profile")
+        self.profile_btn.setToolTip(where + ("\n" + tr("Unsaved changes") if self.dirty else ""))
 
     def _mark_dirty(self) -> None:
         if self._building:
@@ -1254,6 +1305,7 @@ class MainWindow(QMainWindow):
             if self.profile.steps[row].enabled != enabled:
                 self.profile.steps[row].enabled = enabled
                 self._mark_dirty()
+                self._refresh_items()  # the row is painted from its view data, so refresh it (switch, dimmed thumbnail)
                 if row == self.step_list.currentRow():
                     self._show_step(self.profile.steps[row])
 
@@ -1288,6 +1340,23 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._refresh_items()
         self._refresh_empty()
+
+    def add_step_and_select(self) -> None:
+        """The *Add step* button: a new step and straight into the screen selection (Esc removes the empty step again)."""
+        self.add_step()
+        self._pending_new_step = self.profile.steps[-1].id
+        self.capture_step_template()
+
+    def _drop_pending_empty_step(self) -> None:
+        """The first capture of a step created by *Add step* was cancelled: remove that step again if it is still empty."""
+        pend, self._pending_new_step = self._pending_new_step, None
+        if not pend:
+            return
+        for i, st in enumerate(self.profile.steps):
+            if st.id == pend and not st.template:
+                self.step_list.setCurrentRow(i)
+                self.delete_step()
+                return
 
     def delete_step(self) -> None:
         row = self.step_list.currentRow()
@@ -1434,7 +1503,6 @@ class MainWindow(QMainWindow):
         mons = self._detect_monitors()
         if not mons:
             self.lbl_displays.setText(tr("Detected displays: none (screen capture unavailable)"))
-            self.multi_alert.setVisible(False)
             self._fill_monitor_combo([])
             return
         parts = []
@@ -1443,10 +1511,6 @@ class MainWindow(QMainWindow):
             parts.append(f"{m.label}" + (f" -> preset '{', '.join(match)}'" if match else " -> no preset"))
         self.lbl_displays.setText(tr("Detected displays: {x}", x="   |   ".join(parts)))
         self._fill_monitor_combo(mons)
-        self.multi_alert.setVisible(len(mons) > 1 or bool(self.profile.presets))
-        active = self.active_preset
-        self.multi_alert.set_text(tr("{n} display(s) detected, using preset: {name}", n=len(mons),
-                                     name=active.name if active else tr("Default")))
 
     def _refresh_presets(self) -> None:
         """Rebuild the preset combo from the profile (signals blocked, so this never marks the profile dirty)."""
@@ -1474,7 +1538,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_preset_btn(self) -> None:
         p = self.active_preset
-        self.preset_btn.setText(f"{tr('Display preset')}: {p.name if p else tr('Default')}")
+        name = p.name if p else tr("Default")
+        self.preset_menu.setTitle(f"{tr('Display preset')}: {name}")
+        self.preset_btn.setText(name)
+        self.preset_btn.setToolTip(f"{tr('Display preset')}: {name}")
 
     def _fill_preset_menu(self) -> None:
         """Top-bar preset menu: pick a preset, create / rename / delete one, auto-switch, re-detect displays."""
@@ -1790,7 +1857,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(450, snap)
 
     def _show_overlay(self, frame, mon: int, hint: str, on_rect, guides=None) -> None:
-        ov = CaptureOverlay(frame.image, self._qt_geometry(frame, mon), hint, guides=guides(frame) if guides else [])
+        kind, self._capture_kind = self._capture_kind, "target"
+        ov = CaptureOverlay(frame.image, self._qt_geometry(frame, mon), hint, guides=guides(frame) if guides else [], kind=kind)
         self._overlay = ov
         ov.selected.connect(lambda x, y, w, h: self._capture_done(on_rect, frame, mon, x, y, w, h))
         ov.cancelled.connect(self._capture_cancelled)
@@ -1798,6 +1866,7 @@ class MainWindow(QMainWindow):
 
     def _capture_done(self, on_rect, frame, mon: int, x, y, w, h) -> None:
         self._overlay = None
+        self._pending_new_step = None
         follow = None
         try:
             follow = on_rect(frame, x, y, w, h)
@@ -1806,11 +1875,13 @@ class MainWindow(QMainWindow):
                 self._restore_window()
         if follow:
             hint, next_cb, guides = follow
+            self._capture_kind = "area"  # the second drag of "Re-select" is the search area
             self._show_overlay(frame, mon, hint, next_cb, guides)
 
     def _capture_cancelled(self) -> None:
         self._overlay = None
         self._restore_window()
+        self._drop_pending_empty_step()
 
     def _restore_window(self) -> None:
         self.showNormal()
@@ -1906,6 +1977,7 @@ class MainWindow(QMainWindow):
             self._show_step(step)
             self._refresh_items()
 
+        self._capture_kind = "area"
         self._begin_capture(tr("Drag the SEARCH AREA: where this target appears. Esc / right-click cancels."), done,
                             lambda fr: self._guides_for(fr, step))
 
@@ -1925,6 +1997,7 @@ class MainWindow(QMainWindow):
             self._set_box(step, frame, x, y, w, h)
             self.end_editor.set_step(step, self.profile.directory, self.active_preset)
 
+        self._capture_kind = "area"
         self._begin_capture(tr("Drag the area where the end image shows up."), done,
                             lambda fr: self._guides_for(fr))
 
@@ -2084,8 +2157,7 @@ class MainWindow(QMainWindow):
         self._stats.update(t0=time.monotonic(), dry=dry, total=len([x for x in self.profile.steps if x.enabled]))
         self._stats["countdown_until"] = self._stats["t0"] + s.start_delay
         self._set_running(True)
-        self._set_log_open(True)
-        self._refresh_dashboard()
+        self._refresh_dashboard()  # (the log drawer is not opened here: it only opens when the user clicks "Log")
         self._clock.start()
         self.stop_badge.show_badge(s.stop_hotkey)
         self.append_log(f"{'Dry run' if dry else 'Run'} starting - press {s.stop_hotkey or 'the Stop button'} "
@@ -2107,18 +2179,18 @@ class MainWindow(QMainWindow):
             thread.wait(2000)
         self._clock.stop()
         self._set_running(False)
-        self.stop_badge.hide()
         self._restore_window()
         mode = "Dry run" if result.dry_run else "Run"
         self.append_log(f"{mode} finished: {result.reason} - {result.clicks} click(s), {result.loops} loop(s), "
                         f"{result.elapsed:.1f}s", "info", "finished")
         kind, text = {
-            "completed": ("run", tr("Completed")), "user": ("sto", tr("Stopped")), "corner": ("sto", tr("Stopped (corner)")),
+            "completed": ("done", tr("Completed")), "user": ("sto", tr("Stopped")), "corner": ("sto", tr("Stopped (corner)")),
             "click_limit": ("sto", tr("Click limit reached")), "end_condition": ("sto", tr("End image seen")),
             "step_failed": ("err", tr("A step failed")), "idle": ("sto", tr("Stopped: nothing found")),
             "invalid_profile": ("err", tr("Invalid profile")), "error": ("err", tr("Error")),
         }.get(result.reason, ("sto", tr("Stopped")))
         self.pill.set_state(kind, text)
+        self.stop_badge.show_result(kind, f"{text} \u00b7 {tr('{n} clicks', n=result.clicks)}")  # stays for 4 seconds
         self.step_list.set_current_step(None)
 
     def _start_or_stop(self) -> None:
@@ -2146,7 +2218,7 @@ class MainWindow(QMainWindow):
         # the editors show a picture of each target: keep it off the screen while the matcher is looking
         self.step_editor.set_previews_visible(not running)
         self.end_editor.set_previews_visible(not running)
-        for b in (self.btn_add, self.btn_del, self.btn_dup, self.btn_up, self.btn_down, self.step_list):
+        for b in (self.btn_add, self.step_list):
             b.setEnabled(not running)
         self._refresh_items()
         if running:

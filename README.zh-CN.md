@@ -12,6 +12,8 @@
 
 [下载](#下载) · [快速开始](#快速开始) · [功能](#功能) · [详细参考](docs/reference.md) · [English](README.md)
 
+<img src="docs/images/screenshot-zh.png" width="760" alt="ClickFlow 主界面(简易模式):步骤列表、目标图像和速度设置">
+
 </div>
 
 ClickFlow 通过**图像匹配**在屏幕上找到图标并点击。你只需要排好步骤(找到这个、点击、等待、找到那个、点击、等待),ClickFlow 会不断重复,直到你让它停止。
@@ -23,11 +25,16 @@ ClickFlow 通过**图像匹配**在屏幕上找到图标并点击。你只需要
 
 ## 下载
 
-在[最新发布页](https://github.com/ELjagi623/story-autoliker/releases/latest)下载 **`ClickFlow.exe`**。它是适用于 Windows 10 / 11(64 位)的单个文件,免安装,不需要 Python,双击即可运行。
+在[最新发布页](https://github.com/ELjagi623/story-autoliker/releases/latest)有两种下载,都适用于 Windows 10 / 11(64 位),免安装,不需要 Python:
 
-- 首次运行会在 `C:\Users\你的用户名\ClickFlow\` 生成配置和日志。卸载就是删除 exe 和这个文件夹。
+| 文件 | 适用情况 |
+| --- | --- |
+| `ClickFlow-<版本号>-windows-folder.zip` | **推荐。** 解压到任意位置,双击里面的 `ClickFlow.exe`(不要把它和旁边的文件分开)。启动大约一两秒。 |
+| `ClickFlow.exe` | 想要单个文件。它每次启动都要先自己解压,所以打开会慢几秒。 |
+
+- 首次运行会在 `C:\Users\你的用户名\ClickFlow\` 生成配置和日志。卸载就是删除程序文件夹(或 exe)和这个文件夹。
 - exe 没有代码签名,Windows SmartScreen 可能提示"未知发布者",点 **更多信息 > 仍要运行**。
-- 部分杀毒软件会误报所有 PyInstaller 单文件程序。可以核对发布页里 `ClickFlow.exe.sha256` 的校验值,或者[自己从源码构建](docs/reference.md#build-the-exe-yourself)。
+- 部分杀毒软件会误报 PyInstaller 打包的程序。可以核对发布页里各个 `.sha256` 文件的校验值,或者[自己从源码构建](docs/reference.md#build-the-exe-yourself)。
 
 想用源码运行?需要 Python 3.11+。Windows 运行 `run.bat`,macOS / Linux(X11)运行 `./run.sh`,脚本会自动创建虚拟环境并启动程序。
 
@@ -56,8 +63,13 @@ ClickFlow 通过**图像匹配**在屏幕上找到图标并点击。你只需要
 - **透明图标。** 「镂空 / 透明图标」模式只比对图标本身的线条,空心爱心这类透明图标在花哨的背景上也能找到。
 - **找不到时的兜底。** 可以选择在上次找到的位置附近再找一次,或者直接点上次的位置。点之前会先检查「看到这张图就跳过」(例如红色的已点赞爱心),避免把已经点过的赞取消掉。详见[详细参考](docs/reference.md#transparent-icons-and-not-found-fallbacks)。
 - **安全设计。** 试运行、点击总数上限、随机延迟抖动,以及可选的结束条件图像。
-- **实时日志。** 记录每一步的相似度、位置和点击坐标。
-- **简易 / 高级两种模式**,浅色 / 深色主题,中英文界面。
+- **实时日志和运行面板。** 运行时显示状态、点击数、循环数、用时和最近一次匹配;打开 *日志* 面板可以看到每一步的相似度、位置和点击坐标。
+- **简易 / 高级两种模式**,简洁的浅色主题,界面默认英文,可在顶栏一键切换为中文。
+
+<p align="center">
+  <img src="docs/images/screenshot-running.png" width="380" alt="运行中的面板(英文界面)">
+  <img src="docs/images/screenshot-advanced.png" width="380" alt="高级模式「Match &amp; area」页(英文界面)">
+</p>
 
 ## 如何停止
 

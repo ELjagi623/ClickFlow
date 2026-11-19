@@ -1,4 +1,4 @@
-"""Design-system dialogs: icon badge + title + body + footer buttons.
+"""Design-system dialogs: title + subtitle + body + footer buttons (a status glyph only for warnings and errors).
 
 Every function here is modal and returns the user's choice, so callers read like the QMessageBox / QInputDialog code
 they replace. Tests monkeypatch these module-level functions instead of driving a real modal loop.
@@ -17,7 +17,7 @@ from . import icons, theme
 from .i18n import tr
 from .widgets import Alert, Segmented, SafeComboBox, button, field, label, tag
 
-_TONE_ICON = {"ac": ("file", "ac_tx"), "wn": ("warn", "wn"), "er": ("err", "er"), "if": ("info", "inf"), "ok": ("ok", "ok")}
+_TONE_GLYPH = {"wn": "warn", "er": "fail"}  # only these two tones get an icon
 
 
 class Dialog(QDialog):
@@ -33,21 +33,17 @@ class Dialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         head = QHBoxLayout()
-        head.setContentsMargins(24, 20, 24, 8)
-        head.setSpacing(14)
-        badge = QFrame()
-        badge.setProperty("gi", tone)
-        badge.setFixedSize(36, 36)
-        bl = QHBoxLayout(badge)
-        bl.setContentsMargins(0, 0, 0, 0)
-        glyph = QLabel()
-        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name, tok = _TONE_ICON.get(tone, ("info", "inf"))
-        glyph.setPixmap(icons.pixmap(icon or name, theme.tok(tok), 20, 2.0, 1.6))
-        bl.addWidget(glyph)
-        head.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        head.setContentsMargins(24, 24, 24, 8)
+        head.setSpacing(12)
+        glyph_name = _TONE_GLYPH.get(tone)
+        if glyph_name:
+            glyph = QLabel()
+            glyph.setFixedSize(24, 24)
+            glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            glyph.setPixmap(icons.status_pixmap(glyph_name, 22, 2.0))
+            head.addWidget(glyph, 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
-        col.setSpacing(2)
+        col.setSpacing(4)
         self.title_label = label(title, "h3", True)
         col.addWidget(self.title_label)
         self.sub_label = label(sub, "muted", True)
@@ -56,7 +52,7 @@ class Dialog(QDialog):
         head.addLayout(col, 1)
         root.addLayout(head)
         self.body = QVBoxLayout()
-        self.body.setContentsMargins(24, 6, 24, 18)
+        self.body.setContentsMargins(24, 8, 24, 24)
         self.body.setSpacing(12)
         root.addLayout(self.body)
         self.footer = QFrame()
@@ -139,7 +135,7 @@ def show_problems(parent, problems: Sequence[str]) -> None:
         rl.setContentsMargins(12, 10, 12, 10)
         rl.setSpacing(10)
         ic = QLabel()
-        ic.setPixmap(icons.pixmap("err", theme.tok("er"), 16, 2.0))
+        ic.setPixmap(icons.status_pixmap("fail", 16, 2.0))
         rl.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
         lb = label(p, "", True)
         rl.addWidget(lb, 1)
@@ -149,7 +145,7 @@ def show_problems(parent, problems: Sequence[str]) -> None:
 
 
 def permission_issues(parent, issues) -> None:
-    d = Dialog(parent, tr("Permission needed"), "", "if", "shield", width=520)
+    d = Dialog(parent, tr("Permission needed"), "", "if", width=520)
     for i in issues:
         d.body.addWidget(Alert(f"{i.name}: {i.message}", "info"))
     d.add_button(tr("Close"), "ok", "primary", default=True)
@@ -162,7 +158,7 @@ def ask_text(parent, title: str, sub: str, caption: str, default: str = "", ok: 
              starts: Sequence[tuple[str, str]] = ()) -> Optional[tuple[str, str]]:
     """Single-line text prompt. Returns ``(text, start_key)`` or None when cancelled; ``starts`` adds a
     "start from" segmented choice [(key, caption), ...]."""
-    d = Dialog(parent, title, sub, "ac", "file")
+    d = Dialog(parent, title, sub, "ac")
     edit = QLineEdit(default)
     edit.selectAll()
     d.body.addWidget(field(caption, edit))
@@ -182,7 +178,7 @@ def ask_text(parent, title: str, sub: str, caption: str, default: str = "", ok: 
 
 
 def choose(parent, title: str, sub: str, items: Sequence[str]) -> Optional[int]:
-    d = Dialog(parent, title, sub, "ac", "display")
+    d = Dialog(parent, title, sub, "ac")
     combo = SafeComboBox()
     combo.addItems(list(items))
     d.body.addWidget(combo)
@@ -193,8 +189,7 @@ def choose(parent, title: str, sub: str, items: Sequence[str]) -> Optional[int]:
 
 def diagnosis(parent, step_name: str, text: str, has_fix: bool) -> bool:
     """Why a test found nothing. Returns True when the user asks to apply the suggested fix."""
-    d = Dialog(parent, tr("Target not found"), tr("Step \"{name}\": this step would NOT click.", name=step_name), "wn", "test",
-               width=540)
+    d = Dialog(parent, tr("Target not found"), tr("Step \"{name}\": this step would NOT click.", name=step_name), "wn", width=540)
     box = QPlainTextEdit(text)
     box.setReadOnly(True)
     box.setMinimumHeight(110)
@@ -212,7 +207,7 @@ def diagnosis(parent, step_name: str, text: str, has_fix: bool) -> bool:
 def about(parent, version: str, licenses: Sequence[tuple[str, str]], start_tab: int = 0) -> None:
     from .widgets import TabStrip
 
-    d = Dialog(parent, f"ClickFlow  {version}", tr("Image-matching auto clicker"), "ac", "cursor", width=640)
+    d = Dialog(parent, f"ClickFlow  {version}", tr("Image-matching auto clicker"), "ac", width=640)
     tabs = TabStrip()
     tabs.add(tr("About"))
     tabs.add(tr("Open-source licenses"))
@@ -235,7 +230,7 @@ def about(parent, version: str, licenses: Sequence[tuple[str, str]], start_tab: 
         row = QHBoxLayout()
         row.setSpacing(10)
         ic = QLabel()
-        ic.setPixmap(icons.pixmap("ok", theme.tok("ok"), 16, 2.0))
+        ic.setPixmap(icons.status_pixmap("done", 16, 2.0))
         row.addWidget(ic)
         row.addWidget(label(txt, "", True), 1)
         al.addLayout(row)

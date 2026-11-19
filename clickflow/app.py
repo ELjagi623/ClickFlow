@@ -261,10 +261,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .gui import i18n, theme
 
     i18n.init()
-    theme.apply(app)
+    theme.apply(app, stylesheet=False)  # fonts / style / palette now; the stylesheet once the window is built (cheaper)
     profile = startup_profile(argv[1] if len(argv) > 1 else None)
-    win = MainWindow(profile)
+    win = MainWindow(profile, defer_hotkey=True)
+    theme.apply(app)
     win.show()
+    app.processEvents()  # paint the window first; the slower set-up (hotkey listeners) follows right after
+    win.finish_startup()
     for issue in platform_utils.check_permissions():
         win.append_log(f"{issue.name}: {issue.message}", "error")
     return app.exec()

@@ -12,6 +12,8 @@
 
 [Download](#download) · [Quick start](#quick-start) · [Features](#features) · [Reference](docs/reference.md) · [中文](README.zh-CN.md)
 
+<img src="docs/images/screenshot-simple.png" width="760" alt="ClickFlow main window in Simple mode: the step list, the target image and the speed controls">
+
 </div>
 
 ClickFlow watches the screen, finds an icon by **image matching**, and clicks it. You build a list of steps (find this, click, wait, find that, click, wait) and ClickFlow repeats them until you stop it.
@@ -23,11 +25,16 @@ It is a generic tool with no site-specific logic. The bundled `instagram_story_l
 
 ## Download
 
-Get **`ClickFlow.exe`** from the [latest release](https://github.com/ELjagi623/story-autoliker/releases/latest). It is a single file for Windows 10 / 11 (64-bit): no installer, no Python. Double-click to run.
+Two downloads on the [latest release](https://github.com/ELjagi623/story-autoliker/releases/latest), both for Windows 10 / 11 (64-bit), with no installer and no Python:
 
-- The first start creates `C:\Users\<you>\ClickFlow\` for profiles and logs. To uninstall, delete the exe and that folder.
+| File | Use it when |
+| --- | --- |
+| `ClickFlow-<version>-windows-folder.zip` | **Recommended.** Unzip anywhere and double-click `ClickFlow.exe` inside (keep the files next to it). Starts in about a second or two. |
+| `ClickFlow.exe` | You want one single file. It unpacks itself on every start, so it opens a few seconds slower. |
+
+- The first start creates `C:\Users\<you>\ClickFlow\` for profiles and logs. To uninstall, delete the program folder (or the exe) and that one.
 - Windows SmartScreen may say "unknown publisher" because the exe is not code-signed. Choose **More info > Run anyway**.
-- Some antivirus tools flag every PyInstaller one-file program. Compare the file's SHA-256 with the `ClickFlow.exe.sha256` published next to it, or [build it yourself](docs/reference.md#build-the-exe-yourself).
+- Some antivirus tools flag PyInstaller programs. Compare the file's SHA-256 with the `.sha256` files published next to the downloads, or [build it yourself](docs/reference.md#build-the-exe-yourself).
 
 Prefer source? You need Python 3.11+. Run `run.bat` on Windows or `./run.sh` on macOS / Linux (X11); the script creates a virtual environment and starts the app.
 
@@ -56,8 +63,13 @@ To practise safely, run `python -m clickflow.mock_window`. It shows a fake story
 - **Transparent icons.** *Outline / transparent icon* mode compares only an icon's own lines, so see-through icons such as an outline heart are found on busy or colourful backgrounds.
 - **Not-found fallbacks.** Optionally look again around the last match, or click where the icon was last found. A *Skip if this image is there* check (for example the red, already-liked heart) stops a fallback click from undoing a like. See the [reference](docs/reference.md#transparent-icons-and-not-found-fallbacks).
 - **Safe by design.** Dry run, a total click limit, random delay jitter, and an optional end-condition image.
-- **Live log.** Every step's confidence, position and click coordinates.
-- **Simple and Advanced modes**, light and dark themes, and an English or Chinese interface.
+- **Live log and run dashboard.** While a run is going you see the status, clicks, loops, elapsed time and the latest match. Open the *Log* panel for every step's confidence, position and click coordinates.
+- **Simple and Advanced modes**, a calm light theme, and an English (default) or Chinese interface you can switch in the top bar.
+
+<p align="center">
+  <img src="docs/images/screenshot-running.png" width="380" alt="The run dashboard while a run is active">
+  <img src="docs/images/screenshot-advanced.png" width="380" alt="Advanced mode, Match &amp; area tab">
+</p>
 
 ## Stopping a run
 

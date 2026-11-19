@@ -1,4 +1,4 @@
-"""Small UI preferences (theme, language, simple/advanced mode) kept in ``~/ClickFlow/ui.json``.
+"""Small UI preferences (language, simple/advanced mode) kept in ``~/ClickFlow/ui.json``.
 
 Everything here is best-effort: a missing or broken file simply means "defaults".
 """
@@ -10,7 +10,7 @@ from typing import Any
 
 from .. import storage
 
-DEFAULTS: dict[str, Any] = {"theme": "light", "lang": "", "mode": "simple"}
+DEFAULTS: dict[str, Any] = {"lang": "", "mode": "simple"}
 _cache: dict[str, Any] | None = None
 
 

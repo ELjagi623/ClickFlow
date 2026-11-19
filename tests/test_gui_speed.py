@@ -22,6 +22,7 @@ def g(qapp, tmp_path):
     win = MainWindow(storage.new_profile("speed", root=tmp_path / "p"), start_hotkey=False)
     win.show()
     win.set_mode(True)
+    win.tabs.setCurrentIndex(2)  # the "Waits & fallbacks" section of the step editor
     win.add_step()
     win.step_list.setCurrentRow(0)
     yield win

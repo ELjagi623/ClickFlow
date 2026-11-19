@@ -6,7 +6,6 @@ from keyword arguments *after* translation, so word order may differ between lan
 """
 from __future__ import annotations
 
-import locale
 from typing import Callable
 
 from . import prefs
@@ -16,17 +15,12 @@ _listeners: list[Callable[[], None]] = []
 
 
 def default_language() -> str:
+    """English unless the user picked Chinese (env CLICKFLOW_LANG wins, then the saved choice)."""
     forced = prefs.env_lang()
     if forced in ("en", "zh"):
         return forced
     saved = str(prefs.get("lang") or "")
-    if saved in ("en", "zh"):
-        return saved
-    try:
-        loc = (locale.getlocale()[0] or "").lower()
-    except Exception:
-        loc = ""
-    return "zh" if loc.startswith("zh") or "chinese" in loc else "en"
+    return saved if saved in ("en", "zh") else "en"
 
 
 def init() -> str:

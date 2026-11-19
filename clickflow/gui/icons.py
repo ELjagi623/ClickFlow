@@ -1,4 +1,4 @@
-"""Line icons from ``assets/icons/icons.svg`` (24 px grid, 1.5 px stroke), rendered in any colour.
+"""Line icons from ``assets/icons/icons.svg`` (24 px grid, 1.5 px stroke), rendered in any colour, plus the 16 px ``st-*`` status shapes.
 
 The sheet holds ``<symbol id="i-name">`` elements. Qt's SVG renderer wants one document per icon, so each symbol
 is split out once and recoloured by rewriting ``stroke`` (cheaper and sharper than masking a bitmap).
@@ -33,6 +33,48 @@ def _load_symbols() -> dict[str, str]:
 
 def has(name: str) -> bool:
     return name in _load_symbols()
+
+
+_status: Optional[dict[str, str]] = None
+
+
+def _load_status() -> dict[str, str]:
+    """The ``st-*`` symbols: 16 px status shapes that carry their own colours (never recoloured)."""
+    global _status
+    if _status is None:
+        _status = {}
+        try:
+            from ..app import resource_root
+
+            text = (resource_root() / "assets" / "icons" / "icons.svg").read_text(encoding="utf-8")
+            for m in re.finditer(r'<symbol id="st-([\w-]+)"[^>]*>(.*?)</symbol>', text, re.S):
+                _status[m.group(1)] = m.group(2)
+        except OSError:
+            pass
+    return _status
+
+
+def has_status(name: str) -> bool:
+    return name in _load_status()
+
+
+@lru_cache(maxsize=128)
+def status_pixmap(name: str, size: int = 16, dpr: float = 1.0) -> QPixmap:
+    """Status glyph (idle, counting, running, stopped, done, fail, warn, info) at ``size`` logical px."""
+    px = max(1, int(round(size * dpr)))
+    img = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    body = _load_status().get(name)
+    if body:
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">{body}</svg>'
+        r = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r.render(p, QRectF(0, 0, px, px))
+        p.end()
+    out = QPixmap.fromImage(img)
+    out.setDevicePixelRatio(dpr)
+    return out
 
 
 @lru_cache(maxsize=512)

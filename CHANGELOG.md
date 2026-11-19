@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.0 - 2026-11-18
+
+**Interface redesign, round 2, and a much faster start** (profiles are unchanged).
+
+* **Light theme only** - the dark theme and its toggle are gone. **English is the default language** (it no longer follows the system
+  locale); switch to Chinese in the top bar. The UI font is **Albert Sans** (SIL Open Font License, bundled in `assets/fonts` with its license); nothing is bold.
+* **Quieter layout:** the top bar is the profile name (menu, coral dot when unsaved), the **display preset** button, Simple / Advanced,
+  the language switch and a **...** menu; the step list is a plain list; the target image is a large preview with *Re-select*, *Test this step* and a one-line
+  search-area status; speed, repeat and click limit are three compact rows; one 72 px bottom bar with a dark live-log panel above it.
+* **Add step** creates the step and goes straight into the screen selection; Esc removes the empty step.
+* **Advanced** is three step tabs (*Step*, *Match & area*, *Waits & fallbacks*) and a *Global* tab instead of one 1400 px scroll.
+* **Run dashboard:** a 40 px status word, progress, four figures, one match line. Status is a glyph shape plus a word, never colour alone.
+* **Screen overlays:** selection with ink-cased strokes and square handles (cream = target, teal = search area, green = found,
+  amber = candidate); the **STOP badge** now shows live status and the run result for 4 seconds.
+* Dialogs show an icon only for warnings and errors.
+* **The live log no longer opens by itself** when a run starts; click *Log* to see it.
+* **Switches slide** (like a native toggle) and every quick click counts, also on the step list.
+* **Faster start:** the main download is now a folder (`ClickFlow\ClickFlow.exe`) instead of a file that had to unpack about 80 MB on every
+  start; on the test machine the window now appears in roughly 1-2 s instead of 3-4 s. The single-file `ClickFlow.exe` is still published
+  (`build_exe.py --onefile`), it just opens more slowly; shorter font stacks and one stylesheet pass at start-up; switching the
+  language takes about a fifth of a second, no longer flashes small windows and no longer marks the profile as changed.
+
 ## 1.2.0 - 2026-11-10
 
 **Transparent icons and "not found" fallbacks** (profile schema 4; older profiles open unchanged, every new option is off).

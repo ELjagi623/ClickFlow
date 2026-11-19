@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller recipe for ClickFlow.   Build with:  python build_exe.py
 
-Default: ONE self-contained file (dist/ClickFlow.exe). Set CLICKFLOW_ONEDIR=1 for a folder build
-(dist/ClickFlow/), which makes it easy to swap the LGPL libraries (Qt, pynput) - see THIRD_PARTY_NOTICES.md.
+Default: a FOLDER (dist/ClickFlow/ClickFlow.exe next to its support files). It starts several times faster than a
+one-file exe, which has to unpack about 80 MB into the temp folder on every launch, and it makes it easy to swap the LGPL
+libraries (Qt, pynput) - see THIRD_PARTY_NOTICES.md. Set CLICKFLOW_ONEFILE=1 for ONE self-contained file (dist/ClickFlow.exe).
 """
 import os
 import re
@@ -11,7 +12,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH)
-ONEDIR = os.environ.get("CLICKFLOW_ONEDIR") == "1"
+ONEDIR = os.environ.get("CLICKFLOW_ONEFILE") != "1"
 
 # ---- version (read from the package without importing it)
 VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', (ROOT / "clickflow" / "__init__.py").read_text(encoding="utf-8")).group(1)

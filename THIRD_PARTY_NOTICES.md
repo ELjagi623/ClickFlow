@@ -20,6 +20,7 @@ used for the official build.
 | PyAutoGUI | 0.9.54 | BSD-3-Clause | mouse clicks and key presses |
 | PyMsgBox, PyScreeze, PyTweening, PyGetWindow, PyRect | various | BSD-3-Clause / MIT | PyAutoGUI's own dependencies |
 | six | 1.17 | MIT | pynput dependency |
+| **Albert Sans** (`assets/fonts`), (c) The Albert Sans Project Authors | variable font | **SIL Open Font License 1.1** (`LICENSES/OFL-1.1-AlbertSans.txt`) | the interface font, bundled unmodified |
 | PyInstaller (bootloader) | 6.x | GPL-2.0-or-later **with a special exception** that allows the executables it produces to be distributed under any licence | packaging only |
 
 Deliberately **not** shipped: `mouseinfo` (GPL-3.0; PyAutoGUI imports it only for a debug window that ClickFlow never opens) and the
@@ -33,8 +34,8 @@ code is MIT-licensed and independent of them. As the LGPL requires, you are free
 version of these libraries:
 
 * **Build from source** with any PySide6 / pynput version you like: `pip install -r requirements.txt`, then
-  `python build_exe.py` (one file) or `python build_exe.py --onedir` (a folder in which the Qt `.dll` files and the pynput
-  package can simply be replaced). Running from source (`python run_clickflow.py`) uses whatever versions are installed.
+  `python build_exe.py` (a folder in which the Qt `.dll` files and the pynput package can simply be replaced) or
+  `python build_exe.py --onefile` (one file). Running from source (`python run_clickflow.py`) uses whatever versions are installed.
 * **Source code of the libraries:** Qt for Python: <https://code.qt.io/cgit/pyside/pyside-setup.git/> and
   <https://pypi.org/project/PySide6/>; Qt: <https://download.qt.io/official_releases/qt/>; pynput:
   <https://github.com/moses-palmer/pynput>.

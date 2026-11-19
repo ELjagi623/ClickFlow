@@ -68,7 +68,7 @@ def test_editor_fields_write_back_to_step(gui):
     e.not_found.setCurrentIndex(e.not_found.findData("key"))
     e.fallback_key.setText("right")
     e.fallback_key.editingFinished.emit()
-    assert not e.rx.isEnabled() and "whole screen is scanned" in e.region_hint.text()  # no search area yet: warned
+    assert not e.rx.isEnabled() and "Scanning the whole screen" in e.region_hint.text()  # no search area yet: warned
     e.set_region_values((10, 20, 300, 200))
     assert e.rx.isEnabled() and "Search area set" in e.region_hint.text()
     e.rw.setValue(300), e.rh.setValue(200)  # fine-tuning the numbers also works
@@ -204,13 +204,13 @@ def test_save_picks_up_values_typed_but_not_yet_committed(gui):
     must save the typed value, not the previous one."""
     gui.add_step()
     gui.step_list.setCurrentRow(0)
-    gui.tabs.setCurrentIndex(1)
+    gui.tabs.setCurrentIndex(3)  # Global
     _type_without_committing(gui.s_start_delay, "9")
     _type_without_committing(gui.s_loops, "42")
     gui.s_jitter.setFocus()
     gui.s_jitter.selectAll()
     QTest.keyClicks(gui.s_jitter, "45")
-    gui.tabs.setCurrentIndex(0)
+    gui.tabs.setCurrentIndex(2)  # Waits & fallbacks
     _type_without_committing(gui.step_editor.timeout, "12")
     _type_without_committing(gui.step_editor.wait_after, "7.5")  # last field typed, never committed
     assert gui.save()
@@ -250,7 +250,7 @@ def test_settings_survive_save_and_app_restart(qapp, tmp_path):
     win.step_list.setCurrentRow(0)
     _type_without_committing(win.step_editor.wait_after, "6.5")
     _type_without_committing(win.step_editor.wait_before, "1.25")
-    win.tabs.setCurrentIndex(1)
+    win.tabs.setCurrentIndex(3)  # Global
     _type_without_committing(win.s_start_delay, "12")
     win.s_infinite.setChecked(True)
     _type_without_committing(win.s_maxclicks, "77")

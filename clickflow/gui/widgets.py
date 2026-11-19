@@ -5,15 +5,16 @@ Qt's default (scrolling over a combo box *changes its value*) silently flips set
 "Right click") while the user is only scrolling the page.
 
 Custom controls (Switch, Segmented, Pill, Alert, Group, ThresholdSlider, HotkeyEdit, ...) read their colours from
-``theme.tok`` at paint time, so a theme switch only needs a repaint.
+``theme.tok`` at paint time, so a repaint is all a restyle needs.
 """
 from __future__ import annotations
 
+import time
 import weakref
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton, QButtonGroup, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
@@ -104,18 +105,18 @@ _icon_refresher = _Refresher()
 _themed.add(_icon_refresher)
 
 
-def set_icon(btn: QAbstractButton, name: str, token: str = "tx", size: int = 16, stroke: float = 1.75) -> None:
+def set_icon(btn: QAbstractButton, name: str, token: str = "tx", size: int = 16, stroke: float = 1.5) -> None:
     slot = _IconSlot(btn, name, token, size, stroke)
     _icon_refresher.slots[btn] = slot
     slot.apply()
 
 
-_VARIANT_ICON_TOKEN = {"primary": "on_ac", "danger": "on_dg", "ghost": "tx2", "": "tx"}
+_VARIANT_ICON_TOKEN = {"primary": "on_ac", "danger": "on_dg", "ghost": "tx2", "link": "ac_tx", "": "tx"}
 
 
 def button(text: str = "", icon: str = "", variant: str = "", size: str = "", tip: str = "",
            on_click: Optional[Callable] = None) -> QPushButton:
-    """A design-system push button. ``variant``: "" | primary | danger | ghost | link; ``size``: "" | sm | lg."""
+    """A design-system push button. ``variant``: "" | primary | danger | ghost | link; ``size``: "" | sm | lg (md is 36 px)."""
     b = QPushButton(text)
     if variant:
         b.setProperty("variant", variant)
@@ -179,28 +180,53 @@ def hline() -> QFrame:
 
 # ============================================================================ switch
 
-def paint_switch(p: QPainter, r: QRect, on: bool, enabled: bool = True) -> None:
+SWITCH_MS = 170  # how long the thumb takes to slide across
+
+
+def _ease(t: float) -> float:
+    """Smooth start and end (smoothstep), so the thumb glides like a native toggle."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def paint_switch(p: QPainter, r: QRect, on: bool, enabled: bool = True, t: Optional[float] = None) -> None:
+    """Draw a 36x20 switch. ``t`` (0 = off, 1 = on) is the animation position; without it the switch is fully on or off."""
+    if t is None:
+        t = 1.0 if on else 0.0
+    e = _ease(t)
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     if not enabled:
-        p.setOpacity(0.42)
+        p.setOpacity(0.5)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(theme.qcolor("sw_on" if on else "sw_off"))  # iOS-style green when on
+    off, on_c = theme.qcolor("sw_off"), theme.qcolor("sw_on")  # ink when on, grey when off (coral is kept for Start)
+    p.setBrush(QColor(*(round(off.getRgb()[i] + (on_c.getRgb()[i] - off.getRgb()[i]) * e) for i in range(4))))
     p.drawRoundedRect(QRectF(r), r.height() / 2, r.height() / 2)
     d = r.height() - 4
-    x = r.right() - d - 1 if on else r.left() + 2
-    p.setBrush(QColor("#FFFFFF") if on else theme.qcolor("sw_th"))
-    p.drawEllipse(QRectF(x, r.top() + 2, d, d))
+    x0, x1 = r.left() + 2, r.right() - d - 1
+    p.setBrush(theme.qcolor("sw_th"))
+    p.drawEllipse(QRectF(x0 + (x1 - x0) * e, r.top() + 2, d, d))
     p.restore()
 
 
 class Switch(QAbstractButton):
-    """36x20 toggle. Same API as a QCheckBox (isChecked / setChecked / toggled)."""
+    """36x20 toggle. Same API as a QCheckBox (isChecked / setChecked / toggled).
+
+    A click or key press slides the thumb across; clicking again mid-slide simply reverses it from where it is, so quick
+    repeated clicks are never dropped. Changes made from code (loading another step, ...) jump straight to the new state.
+    """
 
     def __init__(self, checked: bool = False) -> None:
         super().__init__()
+        self._t = 1.0 if checked else 0.0
+        self._by_user = False
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(SWITCH_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.Linear)  # paint_switch eases the position
+        self._anim.valueChanged.connect(self._set_t)
         self.setCheckable(True)
         self.setChecked(checked)
+        self.toggled.connect(self._on_toggled)
         self.setFixedSize(36, 20)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -208,14 +234,36 @@ class Switch(QAbstractButton):
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(36, 20)
 
+    def nextCheckState(self) -> None:  # noqa: N802 (Qt API): runs for a click or key press, not for setChecked()
+        self._by_user = True
+        try:
+            super().nextCheckState()
+        finally:
+            self._by_user = False
+
+    def _set_t(self, value) -> None:
+        self._t = float(value)
+        self.update()
+
+    def _on_toggled(self, on: bool) -> None:
+        target = 1.0 if on else 0.0
+        self._anim.stop()
+        if self._by_user and self.isVisible():
+            self._anim.setStartValue(self._t)  # from wherever the thumb is now
+            self._anim.setEndValue(target)
+            self._anim.setDuration(max(60, round(SWITCH_MS * abs(target - self._t))))
+            self._anim.start()
+        else:
+            self._set_t(target)
+
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
-        paint_switch(p, self.rect(), self.isChecked(), self.isEnabled())
+        paint_switch(p, self.rect(), self.isChecked(), self.isEnabled(), self._t)
         if self.hasFocus():
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(theme.qcolor("fc"), 2))
+            p.setPen(QPen(theme.qcolor("fc"), 1.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(-1, -1, 1, 1), 11, 11)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
         p.end()
 
 
@@ -231,14 +279,14 @@ class SwitchRow(QWidget):
         lay.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignTop if sub else Qt.AlignmentFlag.AlignVCenter)
         col = QVBoxLayout()
         col.setSpacing(0)
-        self.title = QLabel(title)
-        self.title.setStyleSheet("font-weight: 600;")
+        self.title = label(title, "section")
+        self.title.setMinimumHeight(20)  # the same height as the 20 px switch, so the first line sits on its centre
         col.addWidget(self.title)
         self.sub = label(sub, "hint")
-        self.sub.setVisible(bool(sub))
         col.addWidget(self.sub)
         lay.addLayout(col, 1)
-        self.title.mousePressEvent = lambda e: self.switch.toggle() if self.switch.isEnabled() else None
+        self.sub.setVisible(bool(sub))  # only now has the label a parent: showing a parentless widget flashes a window
+        self.title.mousePressEvent = lambda e: self.switch.click() if self.switch.isEnabled() else None  # (click() animates)
 
 
 # ============================================================================ segmented control
@@ -258,9 +306,10 @@ class Segmented(QFrame):
         self._btns: list[QToolButton] = []
         self._data: list[object] = []
         self._current = -1
+        self.setFixedHeight(36)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(0)
+        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setSpacing(2)
         self._lay = lay
 
     def addItem(self, text: str, data: object = None) -> None:  # noqa: N802
@@ -339,7 +388,7 @@ class TabStrip(QFrame):
     def add(self, text: str, extra: QWidget | None = None) -> QToolButton:
         b = QToolButton()
         b.setProperty("tab", True)
-        b.setText(text)
+        b.setText(text.replace("&", "&&"))
         b.setCheckable(True)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         i = len(self._btns)
@@ -368,19 +417,21 @@ class TabStrip(QFrame):
         self.currentChanged.emit(i)
 
     def setTabText(self, i: int, text: str) -> None:  # noqa: N802
-        self._btns[i].setText(text)
+        self._btns[i].setText(text.replace("&", "&&"))
 
 
-# ============================================================================ status pill, alert, tile, meter
+# ============================================================================ status, alert, tile, meter
 
-_PILL = {  # kind -> (background token, text/dot token)
-    "idle": ("inp", "tx2"), "run": ("ok_bg", "ok"), "cdn": ("ac_soft", "ac_tx"), "dry": ("inf_bg", "inf"),
-    "sto": ("wn_bg", "wn"), "err": ("er_bg", "er"),
-}
+# kind -> status glyph in the icon sprite. State is always glyph shape + a word, never colour alone.
+_STATUS_GLYPH = {"idle": "idle", "cdn": "counting", "run": "running", "dry": "counting", "sto": "stopped",
+                 "err": "fail", "done": "done", "warn": "warn"}
 
 
 class Pill(QWidget):
-    """Status capsule with a coloured dot: idle / run / cdn (countdown) / dry / sto (stopped) / err."""
+    """Status: a glyph shape and a word. kind = idle | cdn (countdown) | run | dry | sto (stopped) | done | err | warn.
+
+    ``big`` is the 40 px status word of the run dashboard; the small one lives in the bottom bar.
+    """
 
     def __init__(self, kind: str = "idle", text: str = "", big: bool = False) -> None:
         super().__init__()
@@ -400,56 +451,62 @@ class Pill(QWidget):
 
     def _font(self) -> QFont:
         f = QFont(self.font())
-        f.setPixelSize(14 if self._big else 12)
-        f.setWeight(QFont.Weight.DemiBold)
+        f.setPixelSize(40 if self._big else 14)
+        f.setWeight(theme.semibold())
         return f
+
+    def _glyph(self) -> int:
+        return 28 if self._big else 16
 
     def sizeHint(self) -> QSize:  # noqa: N802
         w = QFontMetrics(self._font()).horizontalAdvance(self._text)
-        return QSize(w + (46 if self._big else 40), 36 if self._big else 28)
+        gap = 14 if self._big else 8
+        return QSize(self._glyph() + gap + w + 2, 48 if self._big else 24)
 
     def paintEvent(self, _e) -> None:  # noqa: N802
-        bg, fg = _PILL.get(self._kind, _PILL["idle"])
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setBrush(theme.qcolor(bg))
-        p.setPen(QPen(theme.qcolor("bd"), 1) if self._kind == "idle" else Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(theme.qcolor("tx3" if self._kind == "idle" else fg))
-        cx = 15 if self._big else 14
-        p.drawEllipse(QPointF(cx, r.height() / 2 + 0.5), 4, 4)
-        p.setPen(theme.qcolor(fg))
+        g = self._glyph()
+        glyph = icons.status_pixmap(_STATUS_GLYPH.get(self._kind, "idle"), g, 2.0)
+        p.drawPixmap(0, int((self.height() - g) / 2), glyph)
+        p.setPen(theme.qcolor("tx"))
         p.setFont(self._font())
-        p.drawText(QRectF(cx + 10, 0, self.width() - cx - 10, self.height()), Qt.AlignmentFlag.AlignVCenter, self._text)
+        gap = 14 if self._big else 8
+        p.drawText(QRectF(g + gap, 0, self.width() - g - gap, self.height()), Qt.AlignmentFlag.AlignVCenter, self._text)
         p.end()
 
 
-_ALERT_ICON = {"info": ("info", "inf"), "ok": ("ok", "ok"), "wn": ("warn", "wn"), "er": ("err", "er")}
+_ALERT_GLYPH = {"info": "info", "ok": "done", "wn": "warn", "er": "fail"}
 
 
 class Alert(QFrame):
-    """Coloured note bar: tone is info | ok | wn | er. Optional link-style action on the right."""
+    """Note bar: tone is info | ok | wn | er; the tone is a glyph shape, not only a colour. Optional link action on the right.
 
-    def __init__(self, text: str = "", tone: str = "info", action: str = "") -> None:
+    ``plain=True`` is the one-line hint without background or glyph (e.g. the search-area line under the target).
+    """
+
+    def __init__(self, text: str = "", tone: str = "info", action: str = "", plain: bool = False) -> None:
         super().__init__()
         self._tone = tone
+        self._plain = plain
         self.setProperty("alert", tone)
+        self.setProperty("plain", plain)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setContentsMargins(0 if plain else 12, 0 if plain else 10, 0 if plain else 12, 0 if plain else 10)
         lay.setSpacing(10)
         self.icon = QLabel()
         self.icon.setFixedSize(16, 16)
         lay.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.icon.setVisible(not plain)  # (after addWidget: a parentless widget that is shown flashes up as its own window)
         self.label = QLabel(text)
-        self.label.setWordWrap(True)
-        self.label.setStyleSheet("font-size: 12.5px;")
+        self.label.setWordWrap(not plain)
+        self.label.setProperty("role", "hint" if plain else "")
+        if not plain:
+            self.label.setStyleSheet("font-size: 13px;")
         lay.addWidget(self.label, 1)
         self.action = button(action, variant="link")
-        self.action.setStyleSheet("font-size: 12.5px;")
+        lay.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter if plain else Qt.AlignmentFlag.AlignTop)
         self.action.setVisible(bool(action))
-        lay.addWidget(self.action, 0, Qt.AlignmentFlag.AlignTop)
         _themed.add(self)
         self.refresh_theme()
 
@@ -469,18 +526,17 @@ class Alert(QFrame):
         return self._tone
 
     def refresh_theme(self) -> None:
-        name, token = _ALERT_ICON.get(self._tone, _ALERT_ICON["info"])
-        self.icon.setPixmap(icons.pixmap(name, theme.tok(token), 16, 2.0))
+        self.icon.setPixmap(icons.status_pixmap(_ALERT_GLYPH.get(self._tone, "info"), 16, 2.0))
 
 
 class Tile(QFrame):
-    """Dashboard number tile: caption, big value, small footnote."""
+    """Dashboard figure: small caption, big value (32 px), small footnote. No box: hierarchy comes from size."""
 
     def __init__(self, caption: str) -> None:
         super().__init__()
         self.setProperty("tile", True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         self.k = label(caption, "field")
         self.n = label("0", "num")
@@ -500,7 +556,7 @@ class MatchMeter(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._v, self._thr = 0.0, 0.85
-        self.setFixedHeight(18)
+        self.setFixedHeight(14)
 
     def set(self, value: float, threshold: float) -> None:
         self._v, self._thr = value, threshold
@@ -513,18 +569,17 @@ class MatchMeter(QWidget):
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(0.5, 4.5, self.width() - 1, 9)
-        p.setBrush(theme.qcolor("inp"))
-        p.setPen(QPen(theme.qcolor("bd"), 1))
-        p.drawRoundedRect(r, 4.5, 4.5)
+        r = QRectF(0, 4, self.width(), 6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.qcolor("pr"))
+        p.drawRoundedRect(r, 3, 3)
         w = r.width() * self._pos(self._v)
         if w > 1:
-            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme.qcolor("ok" if self._v >= self._thr else "wn"))
-            p.drawRoundedRect(QRectF(r.left(), r.top(), w, r.height()), 4.5, 4.5)
+            p.drawRoundedRect(QRectF(r.left(), r.top(), w, r.height()), 3, 3)
         x = r.left() + r.width() * self._pos(self._thr)
         p.setPen(QPen(theme.qcolor("tx"), 2))
-        p.drawLine(QPointF(x, 1), QPointF(x, 17))
+        p.drawLine(QPointF(x, 1), QPointF(x, 13))
         p.end()
 
 
@@ -535,12 +590,15 @@ class Group(QFrame):
 
     toggled_open = Signal(bool)
 
-    def __init__(self, title: str, open_: bool = True, right: QWidget | None = None) -> None:
+    def __init__(self, title: str, open_: bool = True, right: QWidget | None = None, flat: bool = False) -> None:
         super().__init__()
-        self.setProperty("card", True)
+        if flat:  # no box: a plain section of a page
+            self.setProperty("bare", True)
+        else:
+            self.setProperty("card", True)
         self._open = open_
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 2, 10, 0)
+        root.setContentsMargins(0 if flat else 6, 2, 0 if flat else 10, 0)
         root.setSpacing(0)
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
@@ -563,8 +621,8 @@ class Group(QFrame):
         root.addLayout(head)
         self.body = QWidget()
         self.body_lay = QVBoxLayout(self.body)
-        self.body_lay.setContentsMargins(10, 2, 6, 16)
-        self.body_lay.setSpacing(14)
+        self.body_lay.setContentsMargins(6 if flat else 10, 2, 0 if flat else 6, 8 if flat else 16)
+        self.body_lay.setSpacing(12)
         root.addWidget(self.body)
         self.body.setVisible(open_)
         _themed.add(self)
@@ -630,7 +688,7 @@ class ThresholdSlider(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         self.title = label(title, "field")
         self.readout = label("0.85", "mono")
-        self.readout.setStyleSheet("font-weight: 600;")
+        self.readout.setStyleSheet(f"font-weight: {theme.semi_css()};")
         top.addWidget(self.title)
         top.addStretch(1)
         top.addWidget(self.readout)
@@ -731,14 +789,22 @@ class HotkeyEdit(QLineEdit):
 # ============================================================================ thumbnail
 
 class Thumbnail(QLabel):
-    """Dark tile showing a template image (or a placeholder icon). Hidden while a run is active (safety)."""
+    """Dark tile showing a template image (or a placeholder icon). Hidden while a run is active (safety).
 
-    def __init__(self, width: int = 120, height: int = 80) -> None:
+    With a fixed ``width`` / ``height`` it is a small tile; without them it expands (the big preview in the target card).
+    Pictures are shown at the largest whole-number zoom that fits (nearest neighbour), so a tiny capture stays crisp.
+    """
+
+    def __init__(self, width: int = 0, height: int = 0, radius: int = 8) -> None:
         super().__init__()
         self.setProperty("thumbbox", True)
-        self.setFixedSize(width, height)
+        self._radius = radius
+        if width and height:
+            self.setFixedSize(width, height)
+        else:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.setMinimumSize(96, 64)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._w, self._h = width, height
         self._pix: Optional[QPixmap] = None
         self._missing = ""
         _themed.add(self)
@@ -750,28 +816,39 @@ class Thumbnail(QLabel):
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if self._pix is not None:
             p.setBrush(theme.qcolor("thumb"))
-            p.setPen(QPen(theme.qcolor("bd2"), 1))
-            p.drawRoundedRect(r, 10, 10)
-            s = self._pix.scaled(int((self._w - 12) * 2), int((self._h - 12) * 2), Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
-            s.setDevicePixelRatio(2.0)
-            p.drawPixmap(int((self._w - s.width() / 2) / 2), int((self._h - s.height() / 2) / 2), s)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(r, self._radius, self._radius)
+            pad = 6 if w < 150 else 16
+            aw, ah = max(1, w - 2 * pad), max(1, h - 2 * pad)
+            iw, ih = max(1, self._pix.width()), max(1, self._pix.height())
+            dpr = self.devicePixelRatioF()
+            k = min(aw / iw, ah / ih)
+            if k >= 1:
+                k = float(int(k))  # whole-number zoom: no blur on a tiny capture
+                mode = Qt.TransformationMode.FastTransformation
+            else:
+                mode = Qt.TransformationMode.SmoothTransformation
+            s = self._pix.scaled(max(1, int(iw * k * dpr)), max(1, int(ih * k * dpr)),
+                                 Qt.AspectRatioMode.IgnoreAspectRatio, mode)
+            s.setDevicePixelRatio(dpr)
+            p.drawPixmap(int((w - s.width() / dpr) / 2), int((h - s.height() / dpr) / 2), s)
         else:
             p.setBrush(theme.qcolor("inp"))
-            pen = QPen(theme.qcolor("tx3"), 1, Qt.PenStyle.DashLine)
-            p.setPen(pen)
-            p.drawRoundedRect(r, 10, 10)
-            ic = icons.pixmap("image", theme.tok("tx3"), 28, 2.0, 1.5)
-            p.drawPixmap(int((self._w - 28) / 2), int((self._h - 28) / 2) - (6 if self._missing else 0), ic)
+            p.setPen(QPen(theme.qcolor("bd2"), 1, Qt.PenStyle.DashLine))
+            p.drawRoundedRect(r, self._radius, self._radius)
+            n = 28 if min(w, h) >= 56 else 20
+            ic = icons.pixmap("image", theme.tok("tx3"), n, 2.0, 1.5)
+            p.drawPixmap(int((w - n) / 2), int((h - n) / 2) - (8 if self._missing else 0), ic)
             if self._missing:
                 p.setPen(theme.qcolor("tx3"))
                 f = QFont(self.font())
-                f.setPixelSize(11)
+                f.setPixelSize(13)
                 p.setFont(f)
-                p.drawText(QRectF(4, self._h - 22, self._w - 8, 18), Qt.AlignmentFlag.AlignCenter, self._missing)
+                p.drawText(QRectF(4, h / 2 + 8, w - 8, 20), Qt.AlignmentFlag.AlignCenter, self._missing)
         p.end()
 
     def refresh_theme(self) -> None:
@@ -781,63 +858,104 @@ class Thumbnail(QLabel):
 class HatchedThumb(QLabel):
     """What replaces a hidden thumbnail while a run is active: diagonal hatching + a crossed-out eye."""
 
-    def __init__(self, width: int = 120, height: int = 80) -> None:
+    def __init__(self, width: int = 0, height: int = 0) -> None:
         super().__init__()
-        self.setFixedSize(width, height)
+        if width and height:
+            self.setFixedSize(width, height)
+        else:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.setMinimumSize(96, 64)
 
     def paintEvent(self, _e) -> None:  # noqa: N802
-        paint_hatch(QPainter(self), QRectF(self.rect()), 10, icon_px=24)
+        p = QPainter(self)
+        paint_hatch_inline(p, QRectF(self.rect()), 8, 24)
+        p.end()
 
 
 def paint_hatch(p: QPainter, r: QRectF, radius: float, icon_px: int = 18) -> None:
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.save()
-    rr = r.adjusted(0.5, 0.5, -0.5, -0.5)
-    p.setBrush(theme.qcolor("inp"))
-    p.setPen(QPen(theme.qcolor("bd2"), 1))
-    p.drawRoundedRect(rr, radius, radius)
-    from PySide6.QtGui import QPainterPath
-
-    path = QPainterPath()
-    path.addRoundedRect(rr, radius, radius)
-    p.setClipPath(path)
-    p.setPen(QPen(theme.qcolor("bd"), 1))
-    x = rr.left() - rr.height()
-    while x < rr.right():
-        p.drawLine(QPointF(x, rr.bottom()), QPointF(x + rr.height(), rr.top()))
-        x += 6
-    p.restore()
-    ic = icons.pixmap("eyeoff", theme.tok("tx3"), icon_px, 2.0, 1.5)
-    p.drawPixmap(int(r.center().x() - icon_px / 2), int(r.center().y() - icon_px / 2), ic)
+    """Hatched placeholder (a diagonal-pattern brush) with a crossed-out eye; ends the painter."""
+    paint_hatch_inline(p, r, radius, icon_px)
     p.end()
 
 
-# ============================================================================ step list (card rows)
+def paint_hatch_inline(p: QPainter, r: QRectF, radius: float = 8, icon_px: int = 20) -> None:
+    """Hatched placeholder drawn inside another paint pass (does not end the painter)."""
+    from PySide6.QtGui import QBrush
+
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    rr = r.adjusted(0.5, 0.5, -0.5, -0.5)
+    p.setPen(QPen(theme.qcolor("bd"), 1))
+    p.setBrush(theme.qcolor("inp"))
+    p.drawRoundedRect(rr, radius, radius)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(theme.qcolor("bd"), Qt.BrushStyle.BDiagPattern))
+    p.drawRoundedRect(rr, radius, radius)
+    p.restore()
+    p.drawPixmap(int(r.center().x() - icon_px / 2), int(r.center().y() - icon_px / 2),
+                 icons.pixmap("eyeoff", theme.tok("tx3"), icon_px, 2.0, 1.5))
+
+
+# ============================================================================ step list (plain rows)
 
 ROLE_ID = Qt.ItemDataRole.UserRole
 ROLE_VIEW = Qt.ItemDataRole.UserRole + 1
 
-ROW_H = 72
-CARD_H = 64
+ROW_H = 60
+CARD_H = ROW_H  # (kept name) the painted row fills its whole slot
 
 
 class StepDelegate(QStyledItemDelegate):
-    """Paints one step as a card: grip, 44 px thumbnail, "N. name", tag chips and an on/off switch."""
+    """Paints one step as a plain row: number, 40 px thumbnail, name, optional warning line, on/off switch.
+
+    The selected row is tinted and shows a drag grip; the step the runner is on gets a 3 px coral bar.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.current_key: Optional[str] = None  # id of the step the runner is on (green card)
+        self.current_key: Optional[str] = None  # id of the step the runner is on
+        self._sw: dict = {}  # step id -> [position 0..1, target, time of the last frame]: the row switches' slide animation
+        self._tick_pending = False
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
         return QSize(option.rect.width(), ROW_H)
 
     @staticmethod
+    def card_rect(rect: QRect) -> QRect:
+        return QRect(rect.x(), rect.y(), rect.width(), ROW_H)
+
+    @staticmethod
     def switch_rect(card: QRect) -> QRect:
-        return QRect(card.right() - 12 - 36, card.center().y() - 10, 36, 20)
+        return QRect(card.right() - 8 - 36, card.center().y() - 10, 36, 20)
+
+    def _switch_pos(self, key, on: bool) -> float:
+        """Where the row switch's thumb is right now (0..1). A change of ``on`` starts a slide from the current position, so
+        flipping again mid-slide reverses it smoothly; the first time a row is seen it is simply drawn in its state."""
+        now, target = time.monotonic(), 1.0 if on else 0.0
+        st = self._sw.get(key)
+        if st is None:
+            self._sw[key] = [target, target, now]
+            return target
+        pos, tgt, last = st
+        if tgt != target:
+            tgt, last = target, now
+        step = min(now - last, 0.05) / (SWITCH_MS / 1000)
+        pos = min(pos + step, tgt) if tgt > pos else max(pos - step, tgt)
+        st[:] = [pos, tgt, now]
+        if pos != tgt and not self._tick_pending:  # keep repainting until the thumb has arrived
+            self._tick_pending = True
+            QTimer.singleShot(15, self._tick)
+        return pos
+
+    def _tick(self) -> None:
+        self._tick_pending = False
+        view = self.parent()
+        if view is not None:
+            view.viewport().update()
 
     def paint(self, p: QPainter, option, index) -> None:
         view = index.data(ROLE_VIEW) or {}
-        card = QRect(option.rect.x() + 1, option.rect.y() + 1, option.rect.width() - 2, CARD_H)
+        card = self.card_rect(option.rect)
         enabled_row = bool(option.state & QStyle.StateFlag.State_Enabled)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
@@ -846,126 +964,109 @@ class StepDelegate(QStyledItemDelegate):
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if not enabled_row and not running_here:
-            p.setOpacity(0.7)
-        if running_here:
-            bg, border = theme.qcolor("ok_bg"), theme.qcolor("ok")
-        elif selected:
-            bg, border = theme.qcolor("ac_soft"), theme.qcolor("fc")
+            p.setOpacity(0.6)
+        body = QRectF(card).adjusted(0, 2, 0, -2)
+        if selected or running_here:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.qcolor("tb"))
+            p.drawRoundedRect(body, 8, 8)
         elif hover and enabled_row:
-            bg, border = theme.qcolor("hv"), theme.qcolor("bd")
-        else:
-            bg, border = theme.qcolor("cd"), theme.qcolor("bd")
-        p.setBrush(bg)
-        p.setPen(QPen(border, 1.5 if (selected or running_here) else 1))
-        p.drawRoundedRect(QRectF(card).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
-        # grip
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(theme.qcolor("tx3"))
-        gx, gy = card.x() + 12, card.center().y() - 6
-        for dx in (0, 5):
-            for dy in (0, 5, 10):
-                p.drawEllipse(QPointF(gx + dx, gy + dy), 1.1, 1.1)
-        # thumbnail
-        tr_ = QRectF(card.x() + 28, card.y() + 10, 44, 44)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.qcolor("hv"))
+            p.drawRoundedRect(body, 8, 8)
+        if running_here:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.qcolor("ac"))
+            p.drawRoundedRect(QRectF(card.x(), card.y() + 10, 3, ROW_H - 20), 1.5, 1.5)
+        cy = card.center().y()
+        if selected and enabled_row:  # grip on the selected row (a hover-only grip needs delegate hover state)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.qcolor("tx3"))
+            for dx in (0, 4):
+                for dy in (-5, 0, 5):
+                    p.drawEllipse(QPointF(card.x() + 8 + dx, cy + dy), 1.0, 1.0)
+        # number
+        nfont = QFont(option.font)
+        nfont.setPixelSize(14)
+        p.setFont(nfont)
+        p.setPen(theme.qcolor("tx3"))
+        p.drawText(QRect(card.x() + 16, card.y(), 22, ROW_H), Qt.AlignmentFlag.AlignVCenter,
+                   str(view.get("index", index.row() + 1)))
+        # thumbnail 40 x 40
+        tr_ = QRectF(card.x() + 40, cy - 20, 40, 40)
         if not on:
             p.setOpacity(p.opacity() * 0.5)
         pix = view.get("thumb")
         if view.get("hidden"):
-            paint_hatch_inline(p, tr_)
+            paint_hatch_inline(p, tr_, 6, 16)
         elif pix is not None:
             p.setBrush(theme.qcolor("thumb"))
-            p.setPen(QPen(theme.qcolor("bd2"), 1))
-            p.drawRoundedRect(tr_.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
-            s = pix.scaled(72, 72, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(tr_, 6, 6)
+            s = pix.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             s.setDevicePixelRatio(2.0)
             p.drawPixmap(int(tr_.center().x() - s.width() / 4), int(tr_.center().y() - s.height() / 4), s)
         else:
             p.setBrush(theme.qcolor("inp"))
-            p.setPen(QPen(theme.qcolor("tx3"), 1, Qt.PenStyle.DashLine))
-            p.drawRoundedRect(tr_.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
-            p.drawPixmap(int(tr_.center().x() - 11), int(tr_.center().y() - 11),
-                         icons.pixmap("image", theme.tok("tx3"), 22, 2.0, 1.5))
-        # name
+            p.setPen(QPen(theme.qcolor("bd2"), 1, Qt.PenStyle.DashLine))
+            p.drawRoundedRect(tr_.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+            p.drawPixmap(int(tr_.center().x() - 9), int(tr_.center().y() - 9),
+                         icons.pixmap("image", theme.tok("tx3"), 18, 2.0, 1.5))
+        # name (+ warnings: only what needs the user's attention)
         font = QFont(option.font)
-        font.setPixelSize(13)
-        font.setWeight(QFont.Weight.DemiBold)
+        font.setPixelSize(14)
+        font.setWeight(theme.semibold())
         p.setFont(font)
-        left = card.x() + 84
+        left = card.x() + 92
         right = self.switch_rect(card).left() - 10
-        idx_txt = f"{view.get('index', index.row() + 1)}  "
-        fm = QFontMetrics(font)
-        p.setPen(theme.qcolor("tx3"))
-        p.drawText(QRect(left, card.y() + 10, 40, 20), Qt.AlignmentFlag.AlignVCenter, idx_txt.strip())
-        nx = left + fm.horizontalAdvance(idx_txt) - 2
+        warns = [(t, tone) for t, tone in view.get("tags", []) if tone in ("er", "wn")]
+        name_rect = QRect(left, card.y() + (9 if warns else 0), right - left, 22 if warns else ROW_H)
         p.setPen(theme.qcolor("tx"))
-        name = fm.elidedText(str(view.get("name", "")), Qt.TextElideMode.ElideRight, max(20, right - nx))
-        p.drawText(QRect(nx, card.y() + 10, right - nx, 20), Qt.AlignmentFlag.AlignVCenter, name)
-        # tag chips
-        small = QFont(option.font)
-        small.setPixelSize(10)
-        small.setWeight(QFont.Weight.DemiBold)
-        p.setFont(small)
-        sfm = QFontMetrics(small)
-        x = left
-        for text, tone in view.get("tags", []):
-            w = sfm.horizontalAdvance(text) + 14
-            if x + w > right:
-                break
-            r = QRectF(x, card.y() + 36, w, 18)
-            bgk, fgk = _TAG.get(tone, _TAG[""])
-            p.setPen(QPen(theme.qcolor("bd"), 1) if tone == "" else Qt.PenStyle.NoPen)
-            p.setBrush(theme.qcolor(bgk))
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
-            p.setPen(theme.qcolor(fgk))
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
-            x += w + 4
+        fm = QFontMetrics(font)
+        p.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter,
+                   fm.elidedText(str(view.get("name", "")), Qt.TextElideMode.ElideRight, max(20, right - left)))
+        if warns:
+            small = QFont(option.font)
+            small.setPixelSize(13)
+            p.setFont(small)
+            sfm = QFontMetrics(small)
+            x = left
+            for text, tone in warns:
+                glyph = icons.status_pixmap("fail" if tone == "er" else "warn", 12, 2.0)
+                w = sfm.horizontalAdvance(text)
+                if x + 16 + w > right:
+                    break
+                p.drawPixmap(x, card.y() + 33, glyph)
+                p.setPen(theme.qcolor("er" if tone == "er" else "tx2"))
+                p.drawText(QRect(x + 16, card.y() + 31, w + 4, 18), Qt.AlignmentFlag.AlignVCenter, text)
+                x += 16 + w + 12
         p.restore()
         # switch (drawn at full opacity so it stays readable; dimmed when the list is locked)
         p.save()
-        paint_switch(p, self.switch_rect(card), on, enabled_row)
+        paint_switch(p, self.switch_rect(card), on, enabled_row, self._switch_pos(index.data(ROLE_ID), on))
         p.restore()
 
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
         from PySide6.QtCore import QEvent
 
-        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            card = QRect(option.rect.x() + 1, option.rect.y() + 1, option.rect.width() - 2, CARD_H)
-            if self.switch_rect(card).adjusted(-4, -4, 4, 4).contains(event.position().toPoint()):
-                cur = index.data(Qt.ItemDataRole.CheckStateRole)
-                checked = int(getattr(cur, "value", cur) or 0) == Qt.CheckState.Checked.value  # int or enum, by binding
-                new = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
-                model.setData(index, new, Qt.ItemDataRole.CheckStateRole)
-                return True
+        kind = event.type()
+        if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseButtonRelease):
+            # The switch reacts to the press, and a quick second click arrives as a double-click event: both flip it, so
+            # no click is dropped. (The base class would also treat a release near the left edge as a click on a check box.)
+            if kind != QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                card = self.card_rect(option.rect)
+                if self.switch_rect(card).adjusted(-4, -4, 4, 4).contains(event.position().toPoint()):
+                    cur = index.data(Qt.ItemDataRole.CheckStateRole)
+                    checked = int(getattr(cur, "value", cur) or 0) == Qt.CheckState.Checked.value  # int or enum, by binding
+                    model.setData(index, Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked,
+                                  Qt.ItemDataRole.CheckStateRole)
+                    return True
+            return False
         return super().editorEvent(event, model, option, index)
 
 
-_TAG = {"": ("inp", "tx2"), "ok": ("ok_bg", "ok"), "wn": ("wn_bg", "wn"), "er": ("er_bg", "er"), "if": ("inf_bg", "inf"),
-        "ac": ("ac_soft", "ac_tx")}
-
-
-def paint_hatch_inline(p: QPainter, r: QRectF) -> None:
-    """Hatched placeholder drawn inside another paint pass (does not end the painter)."""
-    from PySide6.QtGui import QPainterPath
-
-    p.save()
-    rr = r.adjusted(0.5, 0.5, -0.5, -0.5)
-    p.setBrush(theme.qcolor("inp"))
-    p.setPen(QPen(theme.qcolor("bd2"), 1))
-    p.drawRoundedRect(rr, 8, 8)
-    path = QPainterPath()
-    path.addRoundedRect(rr, 8, 8)
-    p.setClipPath(path)
-    p.setPen(QPen(theme.qcolor("bd"), 1))
-    x = rr.left() - rr.height()
-    while x < rr.right():
-        p.drawLine(QPointF(x, rr.bottom()), QPointF(x + rr.height(), rr.top()))
-        x += 6
-    p.restore()
-    p.drawPixmap(int(r.center().x() - 10), int(r.center().y() - 10), icons.pixmap("eyeoff", theme.tok("tx3"), 20, 2.0, 1.5))
-
-
 class StepList(QListWidget):
-    """The steps as cards. Drag to reorder; the switch on each card enables / disables the step."""
+    """The steps as plain rows. Drag to reorder; the switch on each row enables / disables the step."""
 
     def __init__(self) -> None:
         super().__init__()

@@ -167,6 +167,20 @@ ZH: dict[str, str] = {
 _STEP = {"left": "左键", "right": "右键", "double": "双击"}
 
 
+# --- round-2 interface (Claude design system): new or reworded labels
+ZH.update({
+    "Add step": "添加步骤", "Add a step and select its target on the screen right away.": "新建一个步骤，并立刻在屏幕上框选目标图。",
+    "Step": "步骤", "Match & area": "匹配与范围", "Waits & fallbacks": "等待与兜底", "Global": "全局",
+    "Step name": "步骤名称", "Click point": "点击位置", "Log": "日志", "More": "更多",
+    "Duplicate step": "复制步骤", "Move step up": "上移步骤", "Move step down": "下移步骤", "Delete step": "删除步骤",
+    "Display presets...": "显示器预设…", "About & safety": "关于与安全提示", "Unsaved changes": "有未保存的更改",
+    "Scanning the whole screen{where}.": "正在扫描整个屏幕{where}。", "Set search area": "设置查找范围",
+    "Skips quietly if it isn't there": "找不到就静默跳过",
+    "{mode} \u00b7 {n} clicks": "{mode} \u00b7 {n} 次点击", "{n} clicks": "{n} 次点击",
+    "Stop any time: {key}, or a screen corner.": "随时可停：按 {key}，或把鼠标甩到屏幕角落。",
+})
+
+
 def format_event(ev) -> str:
     m = ev.message
     mm = re.fullmatch(r"--- loop (\d+)/(\w+) ---", m)

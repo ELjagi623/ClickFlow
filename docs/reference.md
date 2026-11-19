@@ -12,10 +12,16 @@ Features: a step list with per-step template image, threshold, search box, click
 per-display presets that switch automatically by screen resolution - *Test this step* with an automatic diagnosis - dry run -
 stop hotkey / red STOP button / screen-corner emergency stop - a live log. 中文说明见 [README.zh-CN.md](../README.zh-CN.md).
 
-**Interface.** Light / dark theme (top bar), English / Chinese, and two modes: **Simple** (select a target, pick speed and repeats, press
-Start) and **Advanced** (every setting, in collapsible groups). The settings below keep their meaning; the labels were made friendlier:
-*template* is now **target image**, *search box* is **search area**, *match threshold* is **match strictness**, and the old *Step* /
-*Global settings* / *Notes* tabs are **Step settings** / **Global settings** (Advanced mode) / **Profile notes** (a group in Global settings).
+**Interface.** One light theme (the Claude design system; the font is Albert Sans, bundled in `assets/fonts` under the SIL Open Font
+License), English by default with a one-click switch to Chinese in the top bar, and two modes: **Simple** (select a target,
+pick speed and repeats, press Start) and **Advanced** (every setting). The settings below keep their meaning; the labels were made friendlier:
+*template* is now **target image**, *search box* is **search area**, *match threshold* is **match strictness**, and *Monitor 0..16* is a
+display drop-down. In Advanced mode the step editor has three tabs - **Step**, **Match & area**, **Waits & fallbacks** - plus a **Global**
+tab (run rows, stop & limits, timing & display, end condition, display presets, profile notes). Step actions (duplicate, move, delete),
+display presets, profile notes, *About & safety* and the licences live in the **...** menu; the profile name is the profile menu and shows
+a coral dot while there are unsaved changes. **Add step** creates a step and goes straight into the on-screen selection (Esc removes the
+empty step again). While a run is active the red **STOP** badge at the top of the screen shows live status ("Running - 37 clicks - F8")
+and, when the run ends, the result for four seconds.
 
 > **Terms-of-service warning.** Automating likes (or any other interaction) may violate Instagram's - or any other
 > service's - terms of use and can get an account limited or banned. If you use ClickFlow for this, keep the **volume low**,
@@ -24,12 +30,13 @@ Start) and **Advanced** (every setting, in collapsible groups). The settings bel
 
 ## Download (Windows 10 / 11, 64-bit)
 
-Grab **`ClickFlow.exe`** from the project's *Releases* page: a single file, no installation, no Python needed. Double-click it.
+Grab the **ClickFlow** folder from the project's *Releases* page, unzip it anywhere and double-click **`ClickFlow.exe`** inside
+it (keep the files next to it): no installation, no Python needed. Pin or make a shortcut of that exe if you like.
 
-* First start creates `C:\Users\<you>\ClickFlow\` (profiles + logs) and a default profile. Uninstall = delete the exe and that folder.
+* First start creates `C:\Users\<you>\ClickFlow\` (profiles + logs) and a default profile. Uninstall = delete the folder and that one.
 * Windows SmartScreen may say "unknown publisher" (the exe is not code-signed) - *More info > Run anyway*. Some antivirus tools
-  flag every PyInstaller one-file program; you can compare the file's SHA-256 with the `ClickFlow.exe.sha256` published next to
-  it, or build it yourself from source (below).
+  flag PyInstaller programs; you can compare the file's SHA-256 with the `ClickFlow.exe.sha256` published next to it, or build it
+  yourself from source (below).
 * The default profile opens with sensible settings and the two template images; the **search boxes are empty** - draw one per
   step on your own screen (see *Quick start*).
 
@@ -38,8 +45,8 @@ Grab **`ClickFlow.exe`** from the project's *Releases* page: a single file, no i
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements-dev.txt
-.venv\Scripts\python build_exe.py          # -> dist\ClickFlow.exe (one file), then runs its built-in self-test
-.venv\Scripts\python build_exe.py --onedir # -> dist\ClickFlow\ (folder, handy for swapping the LGPL libraries)
+.venv\Scripts\python build_exe.py           # -> dist\ClickFlow\ClickFlow.exe (a folder: fast start), then runs its built-in self-test
+.venv\Scripts\python build_exe.py --onefile # -> dist\ClickFlow.exe (one file: it unpacks itself on every start, so it opens slower)
 ```
 
 `ClickFlow.exe --selftest report.txt` checks that everything a run needs is inside the bundle (matcher, default profile, Qt window,

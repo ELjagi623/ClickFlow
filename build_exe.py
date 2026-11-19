@@ -1,7 +1,7 @@
 """Build the standalone Windows program with PyInstaller.
 
-    python build_exe.py            -> dist/ClickFlow.exe        (one self-contained file)
-    python build_exe.py --onedir   -> dist/ClickFlow/           (folder; easier to swap the LGPL libraries)
+    python build_exe.py            -> dist/ClickFlow/ClickFlow.exe  (a folder: starts fast, easy to swap the LGPL libraries)
+    python build_exe.py --onefile  -> dist/ClickFlow.exe            (one self-contained file; slower to start, it unpacks itself)
 
 Needs `pip install -r requirements-dev.txt`. Also prints the file size and SHA-256 and runs the built program's
 own self-test (`ClickFlow.exe --selftest`), so a broken bundle is caught immediately.
@@ -15,9 +15,9 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent
 env = dict(os.environ)
-onedir = "--onedir" in sys.argv
-if onedir:
-    env["CLICKFLOW_ONEDIR"] = "1"
+onefile = "--onefile" in sys.argv
+if onefile:
+    env["CLICKFLOW_ONEFILE"] = "1"
 
 cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(root / "clickflow.spec")]
 print(" ".join(cmd))
@@ -25,7 +25,7 @@ rc = subprocess.call(cmd, cwd=root, env=env)
 if rc:
     sys.exit(rc)
 
-exe = root / "dist" / ("ClickFlow/ClickFlow.exe" if onedir else "ClickFlow.exe")
+exe = root / "dist" / ("ClickFlow.exe" if onefile else "ClickFlow/ClickFlow.exe")
 if not exe.exists():  # macOS / Linux builds have no .exe suffix
     exe = exe.with_suffix("")
 if not exe.exists():
