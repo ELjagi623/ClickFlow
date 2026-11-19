@@ -6,7 +6,7 @@
 
 **在屏幕上找到图标,按你定的顺序和等待时间依次点击。**
 
-[![最新版本](https://img.shields.io/github/v/release/ELjagi623/story-autoliker?style=flat-square)](https://github.com/ELjagi623/story-autoliker/releases/latest)
+[![最新版本](https://img.shields.io/github/v/release/ELjagi623/ClickFlow?style=flat-square)](https://github.com/ELjagi623/ClickFlow/releases/latest)
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
 ![平台](https://img.shields.io/badge/Windows_10%2F11-已测试-0078d4?style=flat-square)
 
@@ -25,7 +25,7 @@ ClickFlow 通过**图像匹配**在屏幕上找到图标并点击。你只需要
 
 ## 下载
 
-在[最新发布页](https://github.com/ELjagi623/story-autoliker/releases/latest)有两种下载,都适用于 Windows 10 / 11(64 位),免安装,不需要 Python:
+在[最新发布页](https://github.com/ELjagi623/ClickFlow/releases/latest)有两种下载,都适用于 Windows 10 / 11(64 位),免安装,不需要 Python:
 
 | 文件 | 适用情况 |
 | --- | --- |

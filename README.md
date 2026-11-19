@@ -6,7 +6,7 @@
 
 **Find icons on your screen and click them in the order you choose, with the waits you choose.**
 
-[![Latest release](https://img.shields.io/github/v/release/ELjagi623/story-autoliker?style=flat-square)](https://github.com/ELjagi623/story-autoliker/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/ELjagi623/ClickFlow?style=flat-square)](https://github.com/ELjagi623/ClickFlow/releases/latest)
 [![MIT license](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
 ![Platform](https://img.shields.io/badge/Windows_10%2F11-tested-0078d4?style=flat-square)
 
@@ -25,7 +25,7 @@ It is a generic tool with no site-specific logic. The bundled `instagram_story_l
 
 ## Download
 
-Two downloads on the [latest release](https://github.com/ELjagi623/story-autoliker/releases/latest), both for Windows 10 / 11 (64-bit), with no installer and no Python:
+Two downloads on the [latest release](https://github.com/ELjagi623/ClickFlow/releases/latest), both for Windows 10 / 11 (64-bit), with no installer and no Python:
 
 | File | Use it when |
 | --- | --- |
